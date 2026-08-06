@@ -1,0 +1,50 @@
+[tools]
+hk = "1.53.0"
+"cargo:convco" = "0.7.1"
+
+[tasks.format]
+description = "Format Rust sources"
+run = "cargo fmt"
+
+[tasks.format-check]
+description = "Check Rust formatting"
+run = "cargo fmt --check"
+
+[tasks.lint]
+description = "Lint all Rust targets"
+run = "cargo clippy --all-targets --all-features -- -D warnings"
+
+[tasks.lint-fix]
+description = "Apply safe Clippy fixes"
+run = "cargo clippy --fix --allow-dirty --allow-staged --all-targets --all-features"
+
+[tasks.test]
+description = "Run all Rust tests"
+run = "cargo test --all-targets --all-features"
+
+[tasks.check]
+description = "Run all read-only quality checks"
+run = [
+  { task = "format-check" },
+  { task = "lint" },
+  { task = "test" },
+]
+
+[tasks.commit-msg]
+description = "Validate one Conventional Commit message"
+usage = 'arg "<message_file>" help="Path to the commit message file"'
+run = 'convco check --from-stdin < "$usage_message_file"'
+
+[tasks.commits]
+description = "Validate outgoing commits"
+run = '''
+if git rev-parse --verify --quiet origin/master >/dev/null; then
+  convco check origin/master..HEAD
+else
+  convco check HEAD
+fi
+'''
+
+[tasks.hooks-install]
+description = "Install repository-local hk hooks through mise"
+run = "hk install --mise"

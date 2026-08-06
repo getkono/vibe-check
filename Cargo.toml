@@ -1,0 +1,13 @@
+[package]
+name = "vibe-check"
+version = "0.1.0"
+edition = "2024"
+description = "A GitHub Action that classifies and adjudicates pull requests."
+publish = false
+
+[dependencies]
+color-eyre = "0.6.5"
+eyre = "0.6.12"
+tokio = { version = "1.53.1", features = ["full"] }
+tracing = "0.1.44"
+tracing-subscriber = "0.3.23"
