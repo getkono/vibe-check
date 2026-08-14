@@ -1,0 +1,28 @@
+[package]
+name        = "vibe-check-model"
+description = "Frozen vocabulary for vibe-check: identifiers, the verdict lattice, evidence, and the bundle schema."
+version.workspace      = true
+edition.workspace      = true
+rust-version.workspace = true
+license.workspace      = true
+repository.workspace   = true
+authors.workspace      = true
+publish     = false
+
+# This crate is the one that must be right on day one: changing it is the
+# refactor the whole architecture exists to avoid. Its dependency list is
+# therefore deliberately tiny and should stay that way. No I/O, no async, no
+# git, no HTTP — those live in `vibe-check-host`.
+[dependencies]
+serde      = { workspace = true }
+serde_json = { workspace = true }
+smol_str   = { workspace = true }
+camino     = { workspace = true }
+jiff       = { workspace = true }
+thiserror  = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }
+
+[lints]
+workspace = true
