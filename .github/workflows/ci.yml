@@ -6,32 +6,51 @@ on:
       - master
   pull_request:
 
+# Cancel superseded runs on a branch, but never on master.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
 jobs:
   quality:
     name: Quality
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@v6
         with:
-          components: rustfmt, clippy
-      - name: Check formatting
-        run: cargo fmt --check
-      - name: Run Clippy
-        run: cargo clippy --all-targets --all-features -- -D warnings
-      - name: Run tests
-        run: cargo test --all-targets --all-features
+          # vibe-check computes `git merge-base` itself rather than trusting
+          # `github.event.pull_request.base.sha`, which is the base branch tip at
+          # an earlier point and drifts as the base branch moves. That needs
+          # history, not a shallow clone.
+          fetch-depth: 0
+          persist-credentials: false
+      # rust-toolchain.toml pins the channel and components; `rustup show`
+      # materializes it so the pin is what actually runs.
+      - name: Install Rust toolchain
+        run: rustup show
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: quality
+      - uses: jdx/mise-action@v2
+      # CI invokes the same task interface as the git hooks. Duplicating the
+      # cargo invocations here is how CI and `hk` silently drift apart.
+      - name: Check
+        run: mise run check
 
   commits:
     name: Conventional commits
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           fetch-depth: 0
-      - name: Install convco
-        run: cargo install convco --locked
+          persist-credentials: false
+      # `convco` is pinned in mise.toml; installing it unpinned here would let
+      # CI validate against a different version than the commit-msg hook does.
+      - uses: jdx/mise-action@v2
       - name: Check commits
         run: convco check ${{ github.event.pull_request.base.sha }}..${{ github.event.pull_request.head.sha }}
