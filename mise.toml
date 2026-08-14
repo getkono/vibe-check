@@ -1,32 +1,47 @@
 [tools]
 hk = "1.53.0"
 "cargo:convco" = "0.7.1"
+actionlint = "1.7.7"
 
 [tasks.format]
 description = "Format Rust sources"
-run = "cargo fmt"
+run = "cargo fmt --all"
 
 [tasks.format-check]
 description = "Check Rust formatting"
-run = "cargo fmt --check"
+run = "cargo fmt --all --check"
 
 [tasks.lint]
 description = "Lint all Rust targets"
-run = "cargo clippy --all-targets --all-features -- -D warnings"
+run = "cargo clippy --workspace --all-targets --all-features -- -D warnings"
 
 [tasks.lint-fix]
 description = "Apply safe Clippy fixes"
-run = "cargo clippy --fix --allow-dirty --allow-staged --all-targets --all-features"
+run = "cargo clippy --workspace --fix --allow-dirty --allow-staged --all-targets --all-features"
+
+[tasks.lint-actions]
+description = "Lint GitHub Actions workflows"
+# `act` is not reliable enough to gate on, so the workflows are linted
+# statically instead. The contract with Actions that we *do* test dynamically is
+# the generated matrix JSON, which is snapshot-tested from `vibe-check plan`.
+run = "actionlint"
 
 [tasks.test]
 description = "Run all Rust tests"
-run = "cargo test --all-targets --all-features"
+# Hermetic and network-free by design: this runs on the `hk` pre-push hook and
+# must stay fast. Anything slow or networked belongs behind the `e2e` feature.
+run = "cargo test --workspace --all-targets --all-features"
+
+[tasks.snapshot-accept]
+description = "Accept pending insta snapshots"
+run = "cargo insta accept --workspace"
 
 [tasks.check]
 description = "Run all read-only quality checks"
 run = [
   { task = "format-check" },
   { task = "lint" },
+  { task = "lint-actions" },
   { task = "test" },
 ]
 
