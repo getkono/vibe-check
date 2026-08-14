@@ -1,3 +1,5 @@
+//! The `vibe-check` binary.
+
 use eyre::Result;
 use tracing::info;
 

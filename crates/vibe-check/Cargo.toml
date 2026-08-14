@@ -1,0 +1,23 @@
+[package]
+name        = "vibe-check"
+description = "Decides which evidence a pull request needs, sources it from the CI you already run, and adjudicates a verdict."
+version.workspace      = true
+edition.workspace      = true
+rust-version.workspace = true
+license.workspace      = true
+repository.workspace   = true
+authors.workspace      = true
+readme.workspace       = true
+keywords.workspace     = true
+categories.workspace   = true
+publish     = false
+
+[dependencies]
+color-eyre         = { workspace = true }
+eyre               = { workspace = true }
+tokio              = { workspace = true, features = ["rt-multi-thread", "macros"] }
+tracing            = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+[lints]
+workspace = true
