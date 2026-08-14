@@ -843,6 +843,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "vibe-check-testkit"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "camino",
+ "jiff",
+ "tempfile",
+ "tokio",
+ "vibe-check-host",
+ "vibe-check-model",
+]
+
+[[package]]
 name = "wait-timeout"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
