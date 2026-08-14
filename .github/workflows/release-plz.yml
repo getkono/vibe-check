@@ -1,8 +1,13 @@
 name: Release-plz
+
+# NOTE: steps are written out in full rather than shared via YAML anchors.
+# GitHub Actions does not support YAML anchors or aliases (`&name` / `*name`);
+# a workflow using them fails to parse and never runs at all.
 on:
   push:
     branches:
       - master
+
 jobs:
   # Release unpublished packages.
   release-plz-release:
@@ -12,21 +17,32 @@ jobs:
       contents: write
       pull-requests: read
     steps:
-      - &checkout
-        name: Checkout repository
+      # A release created by the default GITHUB_TOKEN does NOT trigger other
+      # workflows, so the binary-build workflow would never fire. A GitHub App
+      # token does trigger them. Configure the `RELEASE_PLZ_APP_ID` variable and
+      # the `RELEASE_PLZ_APP_PRIVATE_KEY` secret to enable that path; without
+      # them this falls back to GITHUB_TOKEN and tags still get created, but
+      # nothing downstream reacts to them.
+      - name: Generate a GitHub App token
+        id: app-token
+        if: vars.RELEASE_PLZ_APP_ID != ''
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ vars.RELEASE_PLZ_APP_ID }}
+          private-key: ${{ secrets.RELEASE_PLZ_APP_PRIVATE_KEY }}
+      - name: Checkout repository
         uses: actions/checkout@v6
         with:
           fetch-depth: 0
           persist-credentials: false
-      - &install-rust
-        name: Install Rust toolchain
+      - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
       - name: Run release-plz
         uses: release-plz/action@v0.5
         with:
           command: release
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ steps.app-token.outputs.token || secrets.GITHUB_TOKEN }}
 
   # Create a PR with the new versions and changelog, preparing the next release.
   release-plz-pr:
@@ -39,11 +55,23 @@ jobs:
       group: release-plz-${{ github.ref }}
       cancel-in-progress: false
     steps:
-      - *checkout
-      - *install-rust
+      - name: Generate a GitHub App token
+        id: app-token
+        if: vars.RELEASE_PLZ_APP_ID != ''
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ vars.RELEASE_PLZ_APP_ID }}
+          private-key: ${{ secrets.RELEASE_PLZ_APP_PRIVATE_KEY }}
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
       - name: Run release-plz
         uses: release-plz/action@v0.5
         with:
           command: release-pr
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ steps.app-token.outputs.token || secrets.GITHUB_TOKEN }}
