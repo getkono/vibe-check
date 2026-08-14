@@ -1,0 +1,25 @@
+[package]
+name        = "vibe-check-host"
+description = "Side-effect ports for vibe-check: forge access, version control, process execution, and the clock."
+version.workspace      = true
+edition.workspace      = true
+rust-version.workspace = true
+license.workspace      = true
+repository.workspace   = true
+authors.workspace      = true
+publish     = false
+
+# The only crate in the workspace whose traits are async, and the only one that
+# is allowed to describe I/O. Everything above it — classification, policy,
+# adjudication — is pure, which is what makes `vibe-check plan` free and lets the
+# adjudicator be tested without a runtime.
+[dependencies]
+vibe-check-model = { workspace = true }
+async-trait      = { workspace = true }
+camino           = { workspace = true }
+jiff             = { workspace = true }
+serde            = { workspace = true }
+thiserror        = { workspace = true }
+
+[lints]
+workspace = true
