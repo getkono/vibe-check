@@ -351,11 +351,31 @@ impl UnverifiedReason {
     }
 }
 
-/// Which of the four states a capability landed in.
+/// Which of the four states a requirement landed in.
 ///
 /// Split out from [`CapabilityResolution`] so counts and the bundle's state
 /// table can be built without cloning the evidence.
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Serialize, Deserialize)]
+///
+/// # This is the answering *method*, not the answer
+///
+/// `Run` means vibe-check ran something, whatever that something reported:
+/// [`CapabilityResolution::state`] maps `Ran { judgement }` to `Run` for every
+/// judgement, a violation included. Whether the answers passed lives in the
+/// adjudication and its escalations, never here. Anything that reads a state as
+/// an outcome will read a failing test run as good news.
+///
+/// # No derived ordering
+///
+/// `PartialOrd`/`Ord` are deliberately not derived. A derived order is
+/// declaration order — `Adopt` < `Run` < `Skip` < `Unverified` — which is not
+/// the confidence order and puts `Adopt` *below* `Unverified`. Aggregating a
+/// capability's scopes with `min` under that order reports `adopt` for a
+/// capability whose other scope went unanswered, which is a fail-open written
+/// into a frozen bundle field. Without the derive that line does not compile,
+/// anywhere in the workspace, and the only way to combine two states is
+/// [`collapse`](Self::collapse). `tests/nothing_orders_a_resolution_state.rs`
+/// keeps the derive from coming back.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum ResolutionState {
     /// An existing artifact answered it.
@@ -369,18 +389,28 @@ pub enum ResolutionState {
 }
 
 impl ResolutionState {
-    /// Order by how much is actually known, least first.
+    /// Order by how much is actually known, least first:
+    /// `Unverified` < `Skip` < `Adopt` < `Run`.
     ///
     /// This is the order [`collapse`](Self::collapse) minimises over, and the
-    /// only thing that order is for. Note that `Adopt` ranking below `Run`
-    /// affects only how a capability is *labelled* — escalation is driven by
-    /// the resolution itself, not by this rank, so the debatable half of the
-    /// ordering never changes a verdict.
+    /// only order this type has — there is no derived [`Ord`], for the reason
+    /// given on the enum.
     ///
-    /// Deliberately not the derived [`Ord`], which follows declaration order
-    /// (`Adopt` < `Run` < `Skip` < `Unverified`) and is a different sequence.
-    /// Sorting states with `min` where `collapse` was meant would pick `Adopt`
-    /// over `Unverified`, which is the fail-open this rank exists to prevent.
+    /// Two of the three steps are worth stating outright, because they are
+    /// what a consumer bucketing capabilities by state inherits:
+    ///
+    /// - **`Skip` below `Adopt`** is deliberate. A skipped scope was never
+    ///   answered — a waiver or a declared inapplicability is a decision *not*
+    ///   to measure — while an adopted one was answered by an artifact. So a
+    ///   capability that ran clean on one crate and was waived on another
+    ///   collapses to `skip`, and a consumer counting "measured capabilities"
+    ///   by state must not count it. Ranking `Skip` above `Adopt` would hide
+    ///   the waiver behind the crate that happened to pass, which is the same
+    ///   fail-open in a quieter register.
+    /// - **`Adopt` below `Run`** is the debatable one, and it is inert:
+    ///   escalation is driven by the resolution, not by this rank, so which of
+    ///   the two answered methods ranks first changes a label and never a
+    ///   verdict.
     #[must_use]
     pub fn confidence_rank(self) -> u8 {
         match self {
@@ -413,8 +443,18 @@ impl ResolutionState {
     /// depended on which finished first would write scheduling noise into a
     /// frozen bundle field.
     ///
-    /// Collapsing is lossy, and the loss is counted rather than hidden — see
-    /// [`Confidence::partial`](crate::bundle::Confidence::partial).
+    /// What collapses is the answering *method*. `Run` is the identity, so a
+    /// capability that ran and reported a violation for one crate and adopted a
+    /// satisfied artifact for another collapses to `Adopt` — the run is not
+    /// "worse" here, it is more confident. Correct for a map of how each
+    /// question was answered, and the reason nothing may read an outcome out of
+    /// that map; the failing run is in the adjudication, where it escalated.
+    ///
+    /// Collapsing is lossy, and the loss is countable —
+    /// [`Confidence::partial`](crate::bundle::Confidence::partial) — though
+    /// nothing can feed that count until a resolution carries the capability it
+    /// answers. See
+    /// [`tally_by_capability`](crate::bundle::Confidence::tally_by_capability).
     #[must_use]
     pub fn collapse(self, other: Self) -> Self {
         if other.confidence_rank() < self.confidence_rank() {
@@ -1080,15 +1120,51 @@ mod tests {
     }
 
     #[test]
-    fn collapse_does_not_follow_the_derived_ordering() {
-        // `Ord` is declaration order, in which `Adopt` is the minimum. Anything
-        // that reached for `min` instead of `collapse` would report `adopt` for
-        // a capability whose other scope was never answered.
-        let scopes = [ResolutionState::Adopt, ResolutionState::Unverified];
-        assert_eq!(scopes.iter().copied().min(), Some(ResolutionState::Adopt));
+    fn the_confidence_order_is_not_the_declaration_order() {
+        // Declaration order runs `Adopt` < `Run` < `Skip` < `Unverified`, so a
+        // derived `Ord` would make `Adopt` the minimum of the pair below and
+        // report the scope that passed for a capability whose other scope went
+        // unanswered. `ResolutionState` therefore has no derived ordering —
+        // that `min` does not compile — and this pins the order that replaced
+        // it. `tests/nothing_orders_a_resolution_state.rs` keeps the derive off.
+        let by_confidence = [
+            ResolutionState::Unverified,
+            ResolutionState::Skip,
+            ResolutionState::Adopt,
+            ResolutionState::Run,
+        ];
+        let mut ranks = by_confidence.map(ResolutionState::confidence_rank);
+        ranks.sort_unstable();
         assert_eq!(
-            ResolutionState::collapse_all(scopes),
+            ranks,
+            by_confidence.map(ResolutionState::confidence_rank),
+            "the four states are listed least-confident first"
+        );
+        assert_eq!(
+            ResolutionState::collapse_all([ResolutionState::Adopt, ResolutionState::Unverified]),
             Some(ResolutionState::Unverified)
+        );
+    }
+
+    #[test]
+    fn a_state_is_the_answering_method_and_not_the_answer() {
+        // `Run` outranks `Adopt`, so a capability whose only real run *failed*
+        // collapses to `adopt`. That is the map saying how the question was
+        // answered, not how it turned out — the failing run escalated through
+        // the adjudicator, which is where outcomes live. Anything that reads
+        // `capability_states` as a pass/fail table reads this backwards.
+        let ran_and_failed = CapabilityResolution::Ran {
+            evidence: measured(),
+            judgement: Judgement::Violated {
+                detail: "2 tests failed".into(),
+            },
+        };
+        assert_eq!(ran_and_failed.state(), ResolutionState::Run);
+        assert_eq!(
+            ResolutionState::collapse_all([ran_and_failed.state(), ResolutionState::Adopt]),
+            Some(ResolutionState::Adopt),
+            "the least confident *method* wins; the failing run is not the \
+             least confident thing here"
         );
     }
 
