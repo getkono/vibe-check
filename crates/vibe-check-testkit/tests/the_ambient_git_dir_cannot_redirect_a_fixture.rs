@@ -9,17 +9,20 @@
 //! caller was already pointing at.
 //!
 //! That is not hypothetical, and it is not a developer's misconfiguration — git
-//! exports these itself. Measured on git 2.55, from a **linked worktree**, which
-//! is how this repository is developed:
+//! exports these itself. Measured on git 2.55:
 //!
-//! | hook | `GIT_DIR` | `GIT_INDEX_FILE` |
+//! | hook | flat clone | linked worktree |
 //! | --- | --- | --- |
-//! | `pre-commit`, `post-commit` | set | set |
-//! | `post-index-change` | set | empty |
-//! | `pre-push` | set | empty |
+//! | `pre-commit`, `post-commit` | `GIT_DIR` empty, `GIT_INDEX_FILE` = `.git/index` | both set, **absolute** |
+//! | `post-index-change`, `pre-push` | both empty | `GIT_DIR` set; `GIT_INDEX_FILE` empty |
 //!
-//! From a flat clone every one of those is empty, which is why the defect
-//! survived: anyone reproducing it in a plain clone finds nothing.
+//! Note the flat-clone `GIT_INDEX_FILE`: it *is* exported, but **relatively**.
+//! Git resolves a relative value against the child's working directory, which
+//! [`TestRepo`] pins to the fixture's own temporary directory, so `.git/index`
+//! lands on the fixture's own index and cannot reach out. Only the
+//! linked-worktree values are absolute, and an absolute one ignores the working
+//! directory entirely. That asymmetry is the whole reason this survived review:
+//! reproduce it in a plain clone and the variable is set but harmless.
 //!
 //! `hk` runs `mise run test` on `pre-push`, so `GIT_DIR` was live and did the
 //! damage — a fixture's index installed in the real `.git`, a staged two-line
@@ -52,36 +55,59 @@
 //! libtest would run them concurrently and this one would poison the other's git
 //! invocations intermittently, with nothing in the other test's source to
 //! explain it. A new case goes in a new file, or becomes another phase below.
+//!
+//! Note what that means: the `SAFETY` comments on the `set_var` calls below
+//! assert a property **the build does not check**. The only mechanism that would
+//! enforce it is `harness = false` on a `[[test]]` stanza, turning this into a
+//! plain `fn main` where a second test is unrepresentable. That is a small
+//! change — three manifest lines and a signature — and it was left undone only
+//! because this crate's manifest is outside the scope of the fix it guards. If
+//! a second test ever does appear here, prefer converting to `harness = false`
+//! over trying to make two env-mutating tests coexist.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
+use std::ffi::OsString;
 
 use camino::{Utf8Path, Utf8PathBuf};
 use tempfile::TempDir;
 use vibe_check_testkit::TestRepo;
 
-/// An environment variable that exists only for the lifetime of this value.
+/// An environment variable overridden for the lifetime of this value, then put
+/// back exactly as it was found.
 ///
 /// A scope guard rather than paired calls: a phase below that fails does so by
 /// panicking, and a bare `remove_var` after the panicking call never runs. The
 /// unwind would then carry a live `GIT_DIR` into every later phase and turn one
 /// failure into four.
-struct AmbientVar(&'static str);
+///
+/// It restores rather than deletes because the variable may already have had a
+/// value — this test's own subject is a suite that inherits `GIT_DIR` from a
+/// commit-time hook. Deleting it would leave phases 2-4 running in a different
+/// environment from phase 1, which is not what any of them claims to test.
+struct AmbientVar(&'static str, Option<OsString>);
 
 impl AmbientVar {
-    /// Set `key` until the returned value is dropped.
+    /// Override `key` until the returned value is dropped.
     fn set(key: &'static str, value: &str) -> Self {
+        let previous = std::env::var_os(key);
         // SAFETY: this binary contains exactly one test, as its module
         // documentation requires, so no other thread is reading the environment
         // or spawning a process while it is modified.
         unsafe { std::env::set_var(key, value) };
-        Self(key)
+        Self(key, previous)
     }
 }
 
 impl Drop for AmbientVar {
     fn drop(&mut self) {
         // SAFETY: as in `set`.
-        unsafe { std::env::remove_var(self.0) };
+        unsafe {
+            match &self.1 {
+                Some(previous) => std::env::set_var(self.0, previous),
+                None => std::env::remove_var(self.0),
+            }
+        }
     }
 }
 
@@ -114,6 +140,12 @@ fn snapshot(repo: &TestRepo) -> Snapshot {
 /// first. A redirected fixture corrupts another repository before it looks
 /// wrong itself, and the victim's diff is the diagnostic worth printing; a
 /// fixture-side `assert!` that fires first would hide it behind a terse line.
+///
+/// This buys the full diff for the `GIT_DIR` phase only. The `GIT_INDEX_FILE`
+/// and `GIT_WORK_TREE` reverts still die earlier — inside `snapshot`, because
+/// the victim's index is already unreadable by then, and inside `git init`
+/// respectively. Both fail loudly with git's own message naming the fixture
+/// blob, so that is cosmetic rather than a gap.
 struct Fixture {
     base: String,
     has_its_own_git_dir: bool,
