@@ -25,8 +25,13 @@
 //! when a variant was added. It lives in `reason.rs`'s own `#[cfg(test)]`
 //! module, where the enum is local and the `match` is genuinely exhaustive.
 //! What is left for this file is what only an external consumer can prove: that
-//! the public API serializes, and that the bytes already in fixtures are
-//! unchanged.
+//! the public API serializes, and what the bytes are.
+//!
+//! Those byte assertions are prospective, not archaeological. There are no JSON
+//! fixture files in this repository and no bundle has ever been written, so
+//! nothing on disk was consulted or could be — the literals here are the first
+//! record of this encoding, written so that the *next* change to it has to move
+//! a test.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
@@ -35,14 +40,18 @@ use vibe_check_model::{
     RequirementId, Resolutions, UnverifiedReason,
 };
 
-/// The one variant the workspace already writes, byte for byte.
+/// The one variant the workspace constructs outside a test, byte for byte.
 ///
-/// Every JSON fixture in the tree carries `Unattributed` — it is one of the two
-/// variants the internal tagging could encode — so these exact bytes are the
-/// whole of `EvidenceRef`'s observable history. Asserting them as a literal is
-/// the evidence that changing the tagging broke no reader that exists: had the
-/// encoding of this variant moved, every stored bundle would have to be
-/// migrated, and this test would say so rather than a reviewer having to.
+/// `Unattributed` is what every non-test construction in the tree reaches for,
+/// and it is one of the two variants internal tagging could encode, so it is
+/// the variant most likely to have been written by anything. These bytes are
+/// unchanged from before the retagging — measured on both sides, not inferred —
+/// which is the concrete form of the claim that this change breaks no reader.
+///
+/// That claim is cheap to make good on right now: nothing has been written yet.
+/// The assertion is here for later, when it stops being cheap. Note the
+/// narrower scope than "no bytes moved" — see `Flag`, whose encoding did move,
+/// documented on the pull request.
 #[test]
 fn unattributed_keeps_the_bytes_it_already_wrote() {
     assert_eq!(

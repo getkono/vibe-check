@@ -189,6 +189,14 @@ impl fmt::Display for PolicyRef {
 /// key is what the degrade-to-the-reason-code contract above reads, so it stays
 /// at the top level and stays spelled the same as on the five sibling enums.
 ///
+/// That placement is necessary for the contract and not sufficient for it: a
+/// document naming a variant this build has never heard of still fails to
+/// deserialize here, exactly as it did under internal tagging — serde answers
+/// `unknown variant`, and a renderer never gets as far as reading the tag it
+/// would degrade on. Making the enum unknown-tolerant is #29 and is not done
+/// here. What this encoding fixes is that the *known* variants can be written
+/// at all.
+///
 /// Adjacent rather than internal tagging, and not by taste. Internal tagging
 /// requires every payload to be a map, and five variants here are newtypes over
 /// [`crate::ids`] string identifiers, which serde refuses to tag internally —
@@ -290,15 +298,21 @@ mod tests {
 
     /// The wire `kind` every variant promises to serialize under.
     ///
-    /// This `match` is the guard the two wire-format defects fixed in this
-    /// module got past. It is exhaustive over a `#[non_exhaustive]` enum, which
-    /// only code inside this crate is allowed to be — an integration test in
-    /// `tests/` is an external crate and would be forced to write a wildcard
-    /// arm, which guards nothing. So it lives here.
+    /// It is exhaustive over a `#[non_exhaustive]` enum, which only code inside
+    /// this crate is allowed to be — an integration test in `tests/` is an
+    /// external crate and would be forced to write a wildcard arm, which guards
+    /// nothing. So it lives here.
     ///
-    /// Adding a variant to [`EvidenceRef`] stops this crate's tests compiling,
-    /// and the arm the author must write is a statement of the new variant's
-    /// wire name. What it cannot do is force the author to also add a sample to
+    /// Its contribution is narrower than "adding a variant breaks the build":
+    /// the `Display` impl above is already an exhaustive `match` over this same
+    /// type, and it broke the build for a new variant long before this existed
+    /// — both of the defects fixed in this module shipped past it. What is new
+    /// is *what the author must write to get compiling again*. `Display` asks
+    /// for a human rendering; this asks for the variant's wire name, which is
+    /// the thing the tests below can then check against the bytes serde
+    /// actually emits.
+    ///
+    /// What it cannot do is force the author to also add a sample to
     /// `every_variant` — that was measured, not assumed: an arm added without a
     /// sample leaves every test below green. The compile error is the prompt,
     /// and it lands the author in this module, next to the list they need to
@@ -322,11 +336,16 @@ mod tests {
     ///
     /// Written out rather than derived, because being derived from the enum is
     /// exactly what would stop it noticing. It is a second, independent copy of
-    /// the variant names, so renaming a variant — or changing `rename_all` —
-    /// moves the serialized `kind` of an existing variant and reddens
+    /// the variant names, so renaming a variant reddens
     /// `every_variant_is_sampled` even after `wire_kind` has been updated to
-    /// agree with the rename. Those are the bytes already sitting in stored
-    /// bundles; they may not move silently.
+    /// agree with the rename — the rename has to be typed out twice, in two
+    /// places, which is the point.
+    ///
+    /// It says nothing about serde. Both sides of that comparison are string
+    /// literals in this module, so a change to the *encoding* of a name — the
+    /// `rename_all` rule, say — is invisible here; that is
+    /// `every_variant_is_tagged_with_its_kind`'s job, and it is checked there
+    /// against real bytes.
     const EVERY_WIRE_KIND: &[&str] = &[
         "policy",
         "requirement",
@@ -363,11 +382,17 @@ mod tests {
 
     #[test]
     fn every_variant_is_sampled() {
-        // Two things at once: that `every_variant` covers each variant exactly
-        // once, so the round trips below are not silently testing seven of
-        // eight; and that no existing variant's wire `kind` has moved, since
-        // `EVERY_WIRE_KIND` is a hand-written copy of those names that a
-        // rename does not carry along with it.
+        // Two things at once: that `every_variant` covers each name in
+        // `EVERY_WIRE_KIND` exactly once, so the round trips below are not
+        // silently testing seven of eight; and that no existing variant has
+        // been renamed, since `EVERY_WIRE_KIND` is a hand-written copy of those
+        // names that a rename does not carry along with it.
+        //
+        // "Every variant" here means every variant the const lists, not every
+        // variant the enum has — the const is hand-maintained, and as
+        // `wire_kind` says, a new variant that reaches neither list is caught
+        // by nothing at run time. The compile error at `wire_kind` is what is
+        // relied on for that case.
         let mut sampled: Vec<&str> = every_variant().iter().map(wire_kind).collect();
         sampled.sort_unstable();
         let mut promised = EVERY_WIRE_KIND.to_vec();
@@ -398,6 +423,18 @@ mod tests {
         // can degrade to the reason code. That promise is only keepable if
         // `kind` is readable at the top level without knowing the variant, so
         // the tag's placement is part of the contract, not an encoding detail.
+        // (Keepable, not kept: see the type's wire-format note — an unknown
+        // variant does not deserialize at all today. This pins the half of it
+        // that the encoding does deliver.)
+        //
+        // This is also the only test here that compares `wire_kind` against
+        // bytes serde actually produced, which makes it the one that notices a
+        // change to how names are encoded rather than to the names themselves.
+        // Note that it would not notice one *today*: every variant is a single
+        // word, so `kebab-case`, `snake_case` and `lowercase` all agree on all
+        // eight. Verified by switching the attribute — the suite stays green.
+        // The first multi-word variant is what arms it, and this is where that
+        // failure will surface.
         for evidence in every_variant() {
             let value = serde_json::to_value(&evidence).expect("serialize");
             let object = value.as_object().expect("every variant is an object");

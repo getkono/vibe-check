@@ -122,9 +122,11 @@ fn strictly_increasing(ledger: &[Escalation]) -> bool {
 /// `serde_json` rather than `Debug`: a ledger ends up in a bundle field, and
 /// the property #26 asks for is about those bytes, not about a rendering that
 /// merely correlates with them. `to_string` is deterministic over a value here
-/// — struct field order is declaration order and `serde_json::Map` is a
-/// `BTreeMap` — so any difference between two runs is a difference in the
-/// ledgers.
+/// because nothing in an `Escalation` is unordered — every field of it, and of
+/// everything it transitively holds, is a scalar, a `String`, a `Vec` or an
+/// `Option`, with struct fields emitted in declaration order. There is no map
+/// anywhere in that closure, so no iteration order is being relied on. Any
+/// difference between two runs is therefore a difference in the ledgers.
 fn as_bytes(ledgers: &(Vec<Escalation>, Vec<Escalation>)) -> (String, String) {
     (
         serde_json::to_string(&ledgers.0).expect("the enforced ledger serializes"),
@@ -213,9 +215,14 @@ fn the_ledger_serializes() {
     let back: Vec<Escalation> = serde_json::from_str(&json).expect("and deserializes");
     assert_eq!(
         back, ledger,
-        "the bytes `as_bytes` compares are a faithful rendering of the ledger, \
-         not a lossy one that two different ledgers could share"
+        "this ledger survives the encoding it is compared through"
     );
+    // Deliberately not claiming injectivity. One ledger holding one escalation
+    // cannot show that two *different* ledgers get different bytes, which is
+    // what `as_bytes` leans on when it reports two runs as equal. That property
+    // does hold — every field of `Escalation` is serialized and none is
+    // collapsed — but it holds by inspection of the type, not by anything this
+    // test executes, and a round trip of a single value is not evidence for it.
 }
 
 #[test]
