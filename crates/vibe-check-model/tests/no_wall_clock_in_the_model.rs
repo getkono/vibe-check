@@ -7,73 +7,293 @@
 //! would make the type a formality, because a caller could then get a fresh
 //! instant without ever naming one.
 //!
-//! `clippy.toml` bans `Timestamp::now`, `Zoned::now`, `SystemTime::now` and
-//! `Instant::now` workspace-wide, so this test is not the first line of
-//! defence. It is the second, and it guards a different thing: the lint checks
-//! resolved paths against a list, so it is silent about a clock reached through
-//! a dependency nobody listed, an `#[allow]` added in the same diff, or a method
-//! named `now` on some future type of our own. This test does not care how the
-//! moment is obtained — it asserts that the *text* of this crate never calls
-//! anything called `now`.
+//! # What this catches, and what the lint catches
+//!
+//! `clippy.toml` is the first line of defence and the more complete one. It
+//! bans the *types* `std::time::SystemTime` and `std::time::Instant`, which is
+//! what closes the spellings that never say `now`: `UNIX_EPOCH.elapsed()`,
+//! `duration_since(UNIX_EPOCH)`, and whatever the next one turns out to be. It
+//! bans `Timestamp::now`, `Zoned::now`, and `TimeZone::system`/`try_system`,
+//! the `TZ` read that can move a civil date by a day.
+//!
+//! This test is the second line, and it is deliberately not a superset. It
+//! scans the crate's source *text*, which reaches two places the lint does not:
+//!
+//! - **Inside macro invocations.** An AST guard sees a macro body as an
+//!   unparsed token stream, so a clock read inside one is invisible to a walk
+//!   over expressions. Clippy resolves paths and does see through macros, but
+//!   only for the paths on its list.
+//! - **Names that do not resolve to a listed path.** A `fn now` this crate
+//!   defines itself hands every caller the shortcut `DecisionTime` refuses to
+//!   provide, and `clippy.toml` cannot ban a path that does not exist yet.
+//!
+//! Both a declaration and a call count. It is not a reason to scan text rather
+//! than parse it that declarations are only visible to a scanner — an AST walk
+//! sees a `fn` item at least as well, and sees `now ()` and `now::<T>()`
+//! without being taught to. The reason is the macro body and the unlistable
+//! name.
 //!
 //! It is vacuous today, deliberately. The model crate contains no such call and
 //! none of its six dependencies would tempt one. It ships as a prospective
 //! guard, in the style of `no_evidence_from_status`: the change it exists to
 //! stop is one that nothing else fails on, that makes the type checker no
 //! unhappier, and that reads in review as a small convenience.
-//!
-//! Scanning text rather than parsing it is a deliberate divergence from the
-//! `syn`-based guards being written elsewhere in this crate's `tests`. A parser
-//! sees calls; the claim here is broader than calls — a `fn now(` *declared* in
-//! this crate is as much a violation as one invoked, since it hands every
-//! caller the shortcut the type refuses to provide.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use camino::{Utf8Path, Utf8PathBuf};
 
-/// The 1-based line numbers on which `now(` appears in code.
+/// Type names that may not appear in this crate at all.
 ///
-/// Comment lines are skipped, and skipped rather than deleted so the numbers
-/// reported are the ones in the file. Skipping them is required, not cosmetic:
-/// this crate's own prose argues about `now()` at length — `time.rs` names the
-/// method several times explaining why it is absent — so a scanner over raw
-/// text would report the sentences that state the rule as violations of it.
+/// Both are banned as *types* by `clippy.toml` for the same reason, and are
+/// repeated here so that this test's name is true on its own: a guard called
+/// `the_model_crate_never_reads_a_clock` that only knows the word `now` goes
+/// green while `SystemTime::UNIX_EPOCH.elapsed()` sits in the file, and a green
+/// assertion that a thing cannot happen while it is happening is worse than no
+/// assertion, because the green is what a reviewer trusts.
+const FORBIDDEN_IDENTIFIERS: [&str; 2] = ["SystemTime", "Instant"];
+
+/// The source with comment and string-literal *contents* blanked out.
 ///
-/// Line comments only, matching `no_evidence_from_status`. The workspace uses
-/// no block comments, and `clippy.toml` plus review are what keep it that way.
+/// Blanked rather than deleted: every byte is replaced by a space and every
+/// newline is preserved, so offsets and line numbers still refer to the file as
+/// written and a failure can name the line a human will find.
+///
+/// Masking both is required, not cosmetic. This crate argues about clocks in
+/// prose and in error messages — `time.rs` names `now()` several times
+/// explaining why it is absent, and the expiry work #32 defers will ship user-
+/// facing text like "decisions read the committer date, not now()". A scanner
+/// over raw text would report the sentences that state the rule as violations
+/// of it, and the fix a hurried author reaches for is to reword the message.
+/// That is how a guard earns a reputation for being worked around rather than
+/// obeyed.
+///
+/// Handles line comments, ordinary and raw string literals, and character
+/// literals — the last only so that `'"'` cannot open a string that runs to the
+/// end of the file. A `'` that is not a complete character literal is a
+/// lifetime and is left alone. The workspace uses no block comments, and
+/// `clippy.toml` plus review are what keep it that way.
+fn code_only(source: &str) -> String {
+    let chars: Vec<char> = source.chars().collect();
+    let mut out = String::with_capacity(source.len());
+    let mut index = 0usize;
+
+    while index < chars.len() {
+        let character = chars[index];
+
+        if character == '/' && chars.get(index + 1) == Some(&'/') {
+            while index < chars.len() && chars[index] != '\n' {
+                out.push(' ');
+                index += 1;
+            }
+            continue;
+        }
+
+        if character == 'r'
+            && !preceded_by_identifier(&chars, index)
+            && let Some(after) = raw_string(&chars, index, &mut out)
+        {
+            index = after;
+            continue;
+        }
+
+        if character == '"' {
+            index = ordinary_string(&chars, index, &mut out);
+            continue;
+        }
+
+        if character == '\''
+            && let Some(after) = character_literal(&chars, index, &mut out)
+        {
+            index = after;
+            continue;
+        }
+
+        out.push(character);
+        index += 1;
+    }
+
+    out
+}
+
+/// Whether `character` can appear inside an identifier.
+fn identifier_char(character: char) -> bool {
+    character.is_alphanumeric() || character == '_'
+}
+
+/// Whether the character before `index` can be part of an identifier.
+fn preceded_by_identifier(chars: &[char], index: usize) -> bool {
+    index > 0 && identifier_char(chars[index - 1])
+}
+
+/// Whether the name at `start..end` in `line` stands alone as an identifier.
+///
+/// So `snow(` and `nowhere(` are not `now`, and `SystemTimeish` is not
+/// `SystemTime`.
+fn stands_alone(line: &str, start: usize, end: usize) -> bool {
+    !line[..start]
+        .chars()
+        .next_back()
+        .is_some_and(identifier_char)
+        && !line[end..].chars().next().is_some_and(identifier_char)
+}
+
+/// Blank a `r"…"` or `r#"…"#` literal, returning the index just past it.
+///
+/// `None` when the `r` at `index` begins an identifier rather than a literal.
+fn raw_string(chars: &[char], index: usize, out: &mut String) -> Option<usize> {
+    let mut hashes = 0usize;
+    let mut cursor = index + 1;
+    while chars.get(cursor) == Some(&'#') {
+        hashes += 1;
+        cursor += 1;
+    }
+    if chars.get(cursor) != Some(&'"') {
+        return None;
+    }
+
+    for _ in index..=cursor {
+        out.push(' ');
+    }
+    cursor += 1;
+
+    while cursor < chars.len() {
+        if chars[cursor] == '"' && (1..=hashes).all(|n| chars.get(cursor + n) == Some(&'#')) {
+            for _ in 0..=hashes {
+                out.push(' ');
+            }
+            return Some(cursor + hashes + 1);
+        }
+        out.push(if chars[cursor] == '\n' { '\n' } else { ' ' });
+        cursor += 1;
+    }
+
+    Some(cursor)
+}
+
+/// Blank a `"…"` literal, returning the index just past it.
+///
+/// Newlines survive, including the one after a `\` line continuation, because
+/// the assertion messages in this workspace are written that way and losing
+/// them would shift every line number reported after the first long message.
+fn ordinary_string(chars: &[char], index: usize, out: &mut String) -> usize {
+    out.push(' ');
+    let mut cursor = index + 1;
+
+    while cursor < chars.len() {
+        match chars[cursor] {
+            '\\' => {
+                out.push(' ');
+                if let Some(escaped) = chars.get(cursor + 1) {
+                    out.push(if *escaped == '\n' { '\n' } else { ' ' });
+                }
+                cursor += 2;
+            }
+            '"' => {
+                out.push(' ');
+                return cursor + 1;
+            }
+            '\n' => {
+                out.push('\n');
+                cursor += 1;
+            }
+            _ => {
+                out.push(' ');
+                cursor += 1;
+            }
+        }
+    }
+
+    cursor
+}
+
+/// Blank a `'x'` or `'\n'` literal, returning the index just past it.
+///
+/// `None` for a lifetime, which is every other use of `'` in Rust and must be
+/// left in place.
+fn character_literal(chars: &[char], index: usize, out: &mut String) -> Option<usize> {
+    let end = if chars.get(index + 1) == Some(&'\\') {
+        (index + 3..=index + 8).find(|at| chars.get(*at) == Some(&'\''))?
+    } else if chars.get(index + 2) == Some(&'\'') {
+        index + 2
+    } else {
+        return None;
+    };
+
+    for _ in index..=end {
+        out.push(' ');
+    }
+    Some(end + 1)
+}
+
+/// The 1-based line numbers on which this crate reads a clock.
 fn wall_clock_lines(source: &str) -> Vec<usize> {
-    source
+    code_only(source)
         .lines()
         .enumerate()
-        .filter(|(_, line)| !line.trim_start().starts_with("//") && contains_now_call(line))
+        .filter(|(_, line)| calls_or_declares_now(line) || names_a_clock_type(line))
         .map(|(index, _)| index + 1)
         .collect()
 }
 
 /// Whether a line calls or declares something named `now`.
-fn contains_now_call(line: &str) -> bool {
+///
+/// Tolerant of the spellings rustfmt and generics produce: `now()`, `now ()`,
+/// and `now::<Utc>()` all count, as does `fn now(`. The name must stand alone,
+/// so `snow(` and `nowhere(` do not.
+fn calls_or_declares_now(line: &str) -> bool {
     let mut cursor = 0usize;
-    while let Some(offset) = line[cursor..].find("now(") {
-        let start = cursor + offset;
-        cursor = start + "now(".len();
 
-        let preceded_by_identifier = line[..start]
+    while let Some(offset) = line[cursor..].find("now") {
+        let start = cursor + offset;
+        let end = start + "now".len();
+        cursor = end;
+
+        if line[..start]
             .chars()
             .next_back()
-            .is_some_and(|character| character.is_alphanumeric() || character == '_');
-        if !preceded_by_identifier {
+            .is_some_and(identifier_char)
+        {
+            continue;
+        }
+
+        let mut rest = line[end..].trim_start();
+        if let Some(turbofish) = rest.strip_prefix("::<") {
+            let Some(close) = turbofish.find('>') else {
+                continue;
+            };
+            rest = turbofish[close + 1..].trim_start();
+        }
+        if rest.starts_with('(') {
             return true;
         }
     }
+
     false
+}
+
+/// Whether a line names a type that is a clock.
+fn names_a_clock_type(line: &str) -> bool {
+    FORBIDDEN_IDENTIFIERS.iter().any(|identifier| {
+        let mut cursor = 0usize;
+        while let Some(offset) = line[cursor..].find(identifier) {
+            let start = cursor + offset;
+            let end = start + identifier.len();
+            cursor = end;
+
+            if stands_alone(line, start, end) {
+                return true;
+            }
+        }
+        false
+    })
 }
 
 /// Every `.rs` file under this crate's `src`, in a stable order.
 ///
 /// Library sources only. This file lives in `tests/`, so it is outside its own
 /// scan by construction — which is what lets the samples below spell out the
-/// call they forbid in order to prove the scanner sees it.
+/// calls they forbid in order to prove the scanner sees them.
 fn model_sources() -> Vec<(Utf8PathBuf, String)> {
     let src = Utf8Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
 
@@ -147,47 +367,94 @@ fn the_model_crate_never_reads_a_clock() {
 }
 
 #[test]
-fn the_scanner_sees_the_call_that_matters() {
-    // The specific change this file exists to prevent, run through the scanner
-    // to prove the assertion above is reachable rather than vacuous.
-    let sample = "let at = jiff::Timestamp::now();";
+fn the_scanner_sees_the_calls_that_matter() {
+    // The specific changes this file exists to prevent, run through the scanner
+    // to prove the assertion above is reachable rather than vacuous. The last
+    // is the one an AST walk over expressions does not see, because the macro
+    // body reaches it as an unparsed token stream.
+    let sample = r##"
+let at = jiff::Timestamp::now();
+let zoned = jiff::Zoned::now();
+let since = std::time::SystemTime::UNIX_EPOCH.elapsed();
+let measured = Instant::now();
+tracing::info!("generated at {}", Timestamp::now());
+"##;
 
-    assert_eq!(wall_clock_lines(sample), vec![1]);
+    assert_eq!(wall_clock_lines(sample), vec![2, 3, 4, 5, 6]);
+}
+
+#[test]
+fn the_scanner_sees_the_spellings_rustfmt_and_generics_produce() {
+    let sample = r##"
+let spaced = Timestamp::now ();
+let turbofished = Clock::now::<Utc>();
+fn now() -> Self {}
+"##;
+
+    assert_eq!(wall_clock_lines(sample), vec![2, 3, 4]);
+}
+
+#[test]
+fn the_zone_read_is_the_lints_job_and_not_this_scanners() {
+    // Recorded rather than fixed. `TimeZone::system()` reads the runner's `TZ`
+    // and can move a civil date by a day, which is why `clippy.toml` bans it
+    // and `try_system` beside it. This scanner does not see it, and should not
+    // try: `system` is too common a word to match on text, and the lint
+    // resolves the path exactly. Asserted so that a later reader learns the
+    // division of labour here rather than assuming a hole.
+    let sample = r##"
+let local = at.to_zoned(jiff::tz::TimeZone::system()).date();
+"##;
+
+    assert!(
+        wall_clock_lines(sample).is_empty(),
+        "if this ever starts failing, the scanner grew a `system` rule and this \
+         test should become an assertion that it fires"
+    );
 }
 
 #[test]
 fn the_scanner_ignores_prose_and_lookalike_identifiers() {
-    let sample = "\
+    // Every line here is a false positive the scanner used to produce, or would
+    // produce without the masking above. The trailing comment and the strings
+    // are the ones that matter: rewording an error message must never be the
+    // way to make this test pass.
+    let sample = r##"
 /// There is deliberately no `now()` on this type.
 // let evaded = Timestamp::now();
+let a = 1; // there is no now() here
+panic!("never call now() in the model");
+let wrapped = format!(
+    "decisions read the committer date, \
+     not now(), and never SystemTime"
+);
+let raw = r#"now() and SystemTime in a raw string"#;
 fn snow(depth: u8) {}
 let known = knowns.get(key);
 struct Now(Timestamp);
-";
+let quote = '"';
+fn borrow<'a>(now: &'a str) {}
+"##;
 
     assert!(
         wall_clock_lines(sample).is_empty(),
-        "a doc comment arguing about `now()`, a commented-out call, and \
-         identifiers that merely end in those letters are not clock reads"
+        "prose, error messages, raw strings, a char literal holding a quote, \
+         and identifiers that merely contain those letters are not clock \
+         reads; found lines {:?}",
+        wall_clock_lines(sample)
     );
 }
 
 #[test]
-fn the_scanner_sees_a_declaration_as_well_as_a_call() {
-    // Broader than the lint on purpose: a `now` this crate defines hands every
-    // caller the shortcut `DecisionTime` refuses to provide, and `clippy.toml`
-    // cannot ban a path that does not exist yet.
-    let sample = "\
-impl DecisionTime {
-    pub fn now() -> Self {
-        Self(Timestamp::now())
-    }
-}
-";
+fn masking_preserves_line_numbers() {
+    // A failure that names the wrong line sends a reader to the wrong place,
+    // and multi-line strings are how the numbering slips.
+    let sample = r##"
+let message = "a long assertion \
+     wrapped across lines";
+let at = Timestamp::now();
+"##;
 
-    assert_eq!(
-        wall_clock_lines(sample),
-        vec![2, 3],
-        "both the declaration and the call inside it are violations"
-    );
+    assert_eq!(wall_clock_lines(sample), vec![4]);
+    assert_eq!(code_only(sample).lines().count(), sample.lines().count());
 }

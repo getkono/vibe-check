@@ -183,12 +183,20 @@ Three parts:
 
 Enforced prophylactically by `clippy.toml`, which bans `HashMap` and `HashSet`
 (unspecified iteration order), `Path` and `PathBuf` (a lossily converted
-non-UTF-8 path silently changes crate attribution), and the methods
-`SystemTime::now`, `Instant::now`, `jiff::Timestamp::now`, `jiff::Zoned::now`,
-and `fs::read_dir`. The two jiff entries are the ones that bite: this workspace
-reads time through jiff, so banning only the `std` pair left the lint decorative
-in exactly the crate that reads a clock. `Zoned::now` is listed separately
-because it also reads the runner's `TZ`, which can move a civil date by a day.
+non-UTF-8 path silently changes crate attribution), and the clock types
+`std::time::SystemTime` and `std::time::Instant`. Banning the types rather than
+only `now` is deliberate: `UNIX_EPOCH.elapsed()` and `duration_since` read the
+same clock without ever spelling the word, and a guard that only knows `now`
+goes green while one of them sits in the file.
+
+The banned methods are `SystemTime::now`, `Instant::now`, `jiff::Timestamp::now`,
+`jiff::Zoned::now`, `jiff::tz::TimeZone::system`, `jiff::tz::TimeZone::try_system`,
+and `fs::read_dir`. The jiff entries are the ones that bite: this workspace reads
+time through jiff, so banning only the `std` pair left the lint decorative in
+exactly the crate that reads a clock. The two `TimeZone` entries are there
+because a zone read is half a clock read — `committer_date.to_zoned(TimeZone::system()).date()`
+gives two runners in different zones two different dates for one commit, and one
+commit with two dates is one pull request with two verdicts.
 
 Enforcing files: `crates/vibe-check-host/src/vcs.rs` — `Vcs::committer_date` is
 the decision clock; `crates/vibe-check-model/src/time.rs` — `DecisionTime`, the

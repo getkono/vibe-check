@@ -52,11 +52,14 @@ use jiff::{Timestamp, civil::Date, tz::TimeZone};
 /// # Why the accessor is UTC
 ///
 /// [`utc_date`](DecisionTime::utc_date) pins the civil date to UTC rather than
-/// to the runner's local zone. A policy's `expires: 2027-01-01` must mean the
+/// to the runner's local zone, and `clippy.toml` bans `TimeZone::system` so
+/// that the local zone cannot be reached in one hop from a raw timestamp
+/// either. A policy's `expires: 2027-01-01` must mean the
 /// same day on every machine that evaluates it; a runner whose `TZ` is
-/// `Pacific/Auckland` would otherwise reach that date thirteen hours before one
-/// in `UTC`, and the same pull request would get two different verdicts
-/// depending on which runner picked it up.
+/// `Pacific/Kiritimati` would otherwise reach that date fourteen hours before
+/// one in `UTC` — a head commit at `2026-12-31T11:30:00Z` is already on
+/// `2027-01-01` there — and the same pull request would get two different
+/// verdicts depending on which runner picked it up.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct DecisionTime(Timestamp);
 

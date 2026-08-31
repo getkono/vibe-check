@@ -15,6 +15,8 @@ disallowed-types = [
   { path = "std::collections::HashSet", reason = "iteration order is unspecified and leaks into bundles and digests; use BTreeSet" },
   { path = "std::path::Path", reason = "non-UTF-8 paths must be rejected explicitly, never lossily converted, because a lossy path silently changes crate attribution; use camino::Utf8Path (FFI boundaries may allow this lint)" },
   { path = "std::path::PathBuf", reason = "use camino::Utf8PathBuf; see std::path::Path" },
+  { path = "std::time::SystemTime", reason = "banning `now` alone leaves `UNIX_EPOCH.elapsed()` and `duration_since(UNIX_EPOCH)`, which read the same clock without spelling it; decision times arrive as `DecisionTime`, display times through the `clock` module" },
+  { path = "std::time::Instant", reason = "same hole as SystemTime: `elapsed` is a clock read. Durations are display-only and excluded from digests; measure inside the `clock` module" },
 ]
 
 disallowed-methods = [
@@ -22,5 +24,7 @@ disallowed-methods = [
   { path = "std::time::Instant::now", reason = "durations are display-only and excluded from digests; measure inside the `clock` module" },
   { path = "jiff::Timestamp::now", reason = "the wall clock the workspace actually reads; same rule as `SystemTime::now`, and the reason this list exists at all is that `clock` is written against jiff, not std" },
   { path = "jiff::Zoned::now", reason = "reads the wall clock *and* the runner's `TZ`, so it can move a date by a day; decision times are pinned to UTC via `DecisionTime::utc_date`" },
+  { path = "jiff::tz::TimeZone::system", reason = "the `TZ` half of `Zoned::now`, reachable in one hop from any timestamp: `committer_date.to_zoned(TimeZone::system()).date()` gives two runners in different zones two different dates for one commit, which is one pull request with two verdicts. Name the zone, or use `DecisionTime::utc_date`" },
+  { path = "jiff::tz::TimeZone::try_system", reason = "the fallible spelling of `TimeZone::system`, and the same hazard; banning only the infallible one leaves a one-word bypass" },
   { path = "std::fs::read_dir", reason = "directory order is filesystem-dependent; use the `fs` wrapper, which collects and sorts" },
 ]
