@@ -87,14 +87,29 @@ pub struct BundleCore {
     pub advisory_tier: Tier,
     /// Every risk flag the classifier emitted, sorted.
     pub flag_ids: Vec<RiskFlagId>,
-    /// How each required capability was resolved, one entry per capability.
+    /// The answering *method* each required capability ended on, one entry per
+    /// capability.
     ///
     /// Keyed by a bare [`CapabilityId`] while the unit of resolution is a
     /// *requirement* — a (capability × scope) pair — so a capability required
     /// for two crates resolves twice and appears here once. The entry is those
-    /// resolutions collapsed by [`ResolutionState::collapse`]: **least
-    /// confident wins**. `tests-pass` adopted for `kono-core` and unverified
-    /// for `kono-net` reads `unverified`, never `adopt`.
+    /// resolutions collapsed by [`ResolutionState::collapse`]: **the least
+    /// confident method wins**. `tests-pass` adopted for `kono-core` and
+    /// unverified for `kono-net` reads `unverified`, never `adopt`, because an
+    /// entry reading `adopt` while a scope went unanswered is a fail-open
+    /// written into the one part of the bundle that can never be corrected.
+    ///
+    /// **It says nothing about whether anything passed.** A
+    /// [`ResolutionState`] is how the question was answered, not what the
+    /// answer was, so `Run` covers a run that reported a violation exactly as
+    /// it covers a clean one — and `Run` is the *most* confident method, the
+    /// one collapse discards. A capability that ran and failed for `kono-core`
+    /// while adopting a satisfied artifact for `kono-net` reads `adopt` here.
+    /// That is not the worst thing that happened to it; it is how the
+    /// least-confidently-answered scope was answered. Every outcome, that
+    /// violation included, is in the adjudication and its escalations, which is
+    /// what `tier` and `verdict` are computed from. A consumer that buckets
+    /// these four values into pass and fail reads a failing run as good news.
     ///
     /// The rule is documented on the field because the field is frozen. A
     /// consumer reading bundles going back as far as the repository does cannot
@@ -102,11 +117,10 @@ pub struct BundleCore {
     /// and there is no later release in which the key could grow a scope to
     /// disambiguate it.
     ///
-    /// Collapsing is lossy by construction, and the loss is reported beside it
-    /// rather than hidden: [`Confidence::partial`] counts the capabilities
-    /// whose scopes disagreed. Read together, this map says what the worst
-    /// scope did and that count says how many capabilities had a scope disagree
-    /// at all.
+    /// Collapsing is lossy, and [`Confidence::partial`] is where the loss is
+    /// counted — a count nothing can feed yet, for the reason recorded on that
+    /// field. Until it can, an entry here does not disclose whether the
+    /// capability's other scopes agreed with it.
     pub capability_states: BTreeMap<CapabilityId, ResolutionState>,
     /// Digest over the canonicalized verdict-bearing subtree.
     ///
@@ -188,16 +202,19 @@ pub struct Generator {
 
 /// How much of the picture we actually have.
 ///
-/// Rendered as the confidence sentence: *"T2 on 8 capabilities, 3 advisory,
+/// Rendered as the confidence sentence: *"T2 on 8 requirements, 3 advisory,
 /// 2 adopted, 5 run, 1 unverified."* Counting is over **requirements**, not
 /// capabilities: a capability can be adopted for one crate and run for another,
-/// so there is no single state to report for it.
+/// so there is no single state to report for it. The sentence said
+/// "capabilities" until the two counts had to appear in it together.
 ///
-/// [`partial`](Self::partial) is the deliberate exception — it counts the
-/// capabilities that disagreed across their scopes, which is precisely the
-/// thing a requirement count cannot see — and it is the only one. Because the
-/// two units sit in one struct, and one sentence,
-/// [`sentence`](Self::sentence) names the unit whenever it prints that count.
+/// Two fields are the deliberate exceptions, and they are the only two:
+/// [`partial`](Self::partial), which counts the capabilities that disagreed
+/// across their scopes — precisely the thing a requirement count cannot see —
+/// and [`capabilities`](Self::capabilities), which is there to say whether that
+/// grouping happened at all. Because both units sit in one struct, and one
+/// sentence, [`sentence`](Self::sentence) names the unit whenever it prints a
+/// capability count.
 ///
 /// `#[serde(default)]` at the container level, not only on the field that holds
 /// one. The bundle's `confidence` key already defaults when it is *absent*, but
@@ -233,8 +250,30 @@ pub struct Confidence {
     ///
     /// Only [`tally_by_capability`](Self::tally_by_capability) can compute it.
     /// [`tally`](Self::tally) is handed states without the capability they
-    /// belong to, so it cannot group them and leaves this at zero — a zero
-    /// there means "not measured", not "measured and none".
+    /// belong to, so it cannot group them and leaves this at zero.
+    ///
+    /// # Nothing can feed that constructor yet
+    ///
+    /// A tally is built from what [`Resolutions`](crate::resolution::Resolutions)
+    /// yields, and it yields no capability. Its key is a
+    /// [`RequirementId`](crate::ids::RequirementId), a non-invertible digest of
+    /// a capability and its scope, and
+    /// [`CapabilityResolution::capability`](crate::resolution::CapabilityResolution::capability)
+    /// is `None` for precisely `Skipped` and `Unverified` — the two states this
+    /// count exists to expose. So the only iterator that fits a tally today is
+    /// `Resolutions::states`, which fits `tally`, and every bundle written
+    /// before that changes carries a zero here.
+    ///
+    /// Closing it means a resolution carrying the capability it answers: a
+    /// fourth `Resolutions::insert` parameter, or a `resolved()` iterator
+    /// yielding `(CapabilityId, ResolutionState, Enforcement)`. That is an
+    /// accounting-input change and it belongs with the bundle writer (#45),
+    /// which is the first thing that will need it. Recorded here rather than
+    /// left to be discovered, because a count that silently stays zero looks
+    /// exactly like a repository in which nothing ever disagreed.
+    ///
+    /// Read a zero against [`capabilities`](Self::capabilities), which
+    /// distinguishes the two.
     pub partial: usize,
     /// Requirements whose outcome could not raise the enforced tier.
     ///
@@ -243,6 +282,23 @@ pub struct Confidence {
     /// verdict was not being enforced. Orthogonal to the other counts, so it
     /// does not sum with them.
     pub advisory: usize,
+    /// How many distinct capabilities those requirements covered.
+    ///
+    /// Carried so that [`partial`](Self::partial) is legible at zero. Without
+    /// it, `partial: 0` means either "no capability disagreed" or "nobody
+    /// grouped by capability", and `#[serde(default)]` makes an absent field
+    /// the same byte as both. With it: `capabilities == 0` says the grouping
+    /// never happened, and `capabilities > 0` with `partial == 0` says it
+    /// happened and every capability agreed with itself.
+    ///
+    /// Added now rather than beside the first writer, because the ambiguity
+    /// becomes permanent the moment bundles start being written — a field
+    /// added later cannot say anything about the bundles that predate it.
+    /// [`Confidence`] is `#[non_exhaustive]` and additive by contract, so this
+    /// costs one key on the wire and no compatibility.
+    ///
+    /// Zero from [`tally`](Self::tally), which is given no capability to count.
+    pub capabilities: usize,
 }
 
 impl Confidence {
@@ -283,6 +339,17 @@ impl Confidence {
     /// requirements reached. Nothing constructs that map yet — see #45 — so
     /// this returns the count and not the map, rather than guessing at the
     /// shape the writer will want.
+    ///
+    /// # This constructor has no supplier today
+    ///
+    /// Nothing in the workspace can produce its argument for a complete set of
+    /// requirements, so a bundle built from the API as it stands must call
+    /// [`tally`](Self::tally) and carries `partial: 0`. The obstruction and
+    /// what would clear it are recorded on [`partial`](Self::partial). It is
+    /// shipped ahead of its supplier deliberately: the rule for collapsing a
+    /// capability's scopes and the count of what that collapse hides are one
+    /// decision, and splitting them across two milestones is how the map ends
+    /// up frozen with the caveat still unwritten.
     #[must_use]
     pub fn tally_by_capability(
         resolved: impl IntoIterator<Item = (CapabilityId, ResolutionState, Enforcement)>,
@@ -300,6 +367,7 @@ impl Confidence {
                 .and_modify(|(first, disagreed)| *disagreed |= *first != state)
                 .or_insert((state, false));
         }
+        c.capabilities = per_capability.len();
         c.partial = per_capability
             .values()
             .filter(|(_, disagreed)| *disagreed)
@@ -362,10 +430,16 @@ impl Confidence {
             };
             parts.push(format!("{} {unit} partial across scopes", self.partial));
         }
+        // `requirement`, not `capability`. The count is over requirements —
+        // the struct doc has said so since it was written — and the two differ
+        // in exactly the runs that matter: `partial > 0` implies some
+        // capability holds two requirements, so the clause above fires only
+        // where the leading noun would be wrong. "4 capabilities · 2
+        // capabilities partial across scopes" is 2 of 2 rendered as 2 of 4.
         let noun = if self.requirements == 1 {
-            "capability"
+            "requirement"
         } else {
-            "capabilities"
+            "requirements"
         };
         if parts.is_empty() {
             format!("{} {noun}", self.requirements)
@@ -625,7 +699,7 @@ mod tests {
         ]);
         assert_eq!(
             c.sentence(),
-            "4 capabilities · 1 advisory · 2 adopted · 1 run · 1 unverified",
+            "4 requirements · 1 advisory · 2 adopted · 1 run · 1 unverified",
             "the advisory count leads, so a reader cannot miss how much of this \
              verdict was not being enforced"
         );
@@ -634,7 +708,7 @@ mod tests {
     #[test]
     fn confidence_sentence_omits_empty_categories() {
         let c = Confidence::tally([(ResolutionState::Run, Enforcement::Enforcing)]);
-        assert_eq!(c.sentence(), "1 capability · 1 run");
+        assert_eq!(c.sentence(), "1 requirement · 1 run");
     }
 
     /// The case `capability_states`' key forces, end to end.
@@ -771,7 +845,84 @@ mod tests {
         ]);
         assert_eq!(
             c.sentence(),
-            "2 capabilities · 1 adopted · 1 unverified · 1 capability partial across scopes"
+            "2 requirements · 1 adopted · 1 unverified · 1 capability partial across scopes",
+            "the leading count is requirements and the trailing one is \
+             capabilities, and each says which it is"
+        );
+    }
+
+    #[test]
+    fn the_two_denominators_are_never_the_same_number_when_both_appear() {
+        // `partial > 0` implies some capability holds two requirements, so the
+        // partial clause fires *only* where the leading count and the trailing
+        // one differ. Four requirements over two capabilities, both disagreeing:
+        // the trailing 2 is 2 of 2, and printing the leading 4 under the word
+        // "capabilities" made it read as 2 of 4.
+        let c = Confidence::tally_by_capability([
+            (
+                CapabilityId::new("tests-pass"),
+                ResolutionState::Adopt,
+                Enforcement::Enforcing,
+            ),
+            (
+                CapabilityId::new("tests-pass"),
+                ResolutionState::Unverified,
+                Enforcement::Enforcing,
+            ),
+            (
+                CapabilityId::new("clippy-clean"),
+                ResolutionState::Run,
+                Enforcement::Enforcing,
+            ),
+            (
+                CapabilityId::new("clippy-clean"),
+                ResolutionState::Skip,
+                Enforcement::Enforcing,
+            ),
+        ]);
+        assert_eq!((c.requirements, c.capabilities, c.partial), (4, 2, 2));
+        assert_eq!(
+            c.sentence(),
+            "4 requirements · 1 adopted · 1 run · 1 skipped · 1 unverified · \
+             2 capabilities partial across scopes"
+        );
+    }
+
+    #[test]
+    fn the_capability_count_says_whether_partial_was_measured_at_all() {
+        // `partial: 0` is ambiguous on its own — no capability disagreed, or
+        // nobody grouped by capability — and `#[serde(default)]` makes an
+        // absent field the same byte as both. `capabilities` separates them,
+        // which matters because no supplier for `tally_by_capability` exists
+        // yet, so every bundle written today takes the second branch.
+        let not_measured = Confidence::tally([
+            (ResolutionState::Adopt, Enforcement::Enforcing),
+            (ResolutionState::Unverified, Enforcement::Enforcing),
+        ]);
+        assert_eq!((not_measured.capabilities, not_measured.partial), (0, 0));
+
+        let measured_and_agreed = Confidence::tally_by_capability([
+            (
+                CapabilityId::new("tests-pass"),
+                ResolutionState::Run,
+                Enforcement::Enforcing,
+            ),
+            (
+                CapabilityId::new("clippy-clean"),
+                ResolutionState::Run,
+                Enforcement::Enforcing,
+            ),
+        ]);
+        assert_eq!(
+            (
+                measured_and_agreed.capabilities,
+                measured_and_agreed.partial
+            ),
+            (2, 0)
+        );
+        assert!(
+            !measured_and_agreed.sentence().contains("partial"),
+            "a measured zero is not a caveat worth printing"
         );
     }
 
@@ -856,6 +1007,17 @@ mod tests {
             parsed.confidence.requirements, 3,
             "the counts that were present must survive"
         );
+
+        // The same for the newest count, which every bundle written before it
+        // existed omits.
+        let mut json = serde_json::to_value(bundle()).expect("serialize");
+        json.get_mut("confidence")
+            .and_then(serde_json::Value::as_object_mut)
+            .expect("confidence is an object")
+            .remove("capabilities");
+        let parsed: EvidenceBundle =
+            serde_json::from_value(json).expect("a confidence object missing a count must parse");
+        assert_eq!(parsed.confidence.capabilities, 0);
     }
 
     #[test]
