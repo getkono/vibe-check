@@ -12,15 +12,17 @@
 //! removed a way to account resolutions in an arbitrary order without removing
 //! the ability to account them at all.
 //!
-//! # Why the bytes are `Debug` output and not JSON
+//! # Why the bytes are JSON
 //!
-//! Because a ledger cannot reach JSON today. `EvidenceRef` is internally tagged
-//! and `Requirement(RequirementId)` is a newtype variant over a string, which
-//! serde cannot internally tag — and every escalation `account` produces
-//! carries exactly that variant. That defect is in `reason.rs`, out of this
-//! change's scope, and recorded by `the_ledger_cannot_be_serialized_yet` below.
-//! Derived `Debug` is total, covers every field, and is a deterministic
-//! function of the value, which is all the byte-identity property needs.
+//! Because they can be. They were `Debug` output when these tests were written:
+//! `EvidenceRef` was internally tagged and `Requirement(RequirementId)` is a
+//! newtype variant over a string, which serde cannot internally tag, so every
+//! escalation `account` produces failed to serialize. `reason.rs` now tags it
+//! adjacently and the ledger reaches the wire, so the byte-identity property is
+//! asserted over the bytes that actually go into a bundle rather than over a
+//! stand-in. `the_ledger_serializes` below is the assertion that keeps it
+//! honest — if serializing regresses, that test says so directly instead of
+//! every property here failing with a `Result` nobody reads.
 //!
 //! # What this does not cover
 //!
@@ -115,13 +117,19 @@ fn strictly_increasing(ledger: &[Escalation]) -> bool {
         .all(|pair| pair[0] < pair[1])
 }
 
-/// Both ledgers rendered to bytes.
+/// Both ledgers rendered to the bytes a bundle would carry.
 ///
-/// `Debug` rather than `serde_json`, and not by preference — see the module
-/// note and `the_ledger_cannot_be_serialized_yet`. When `EvidenceRef` can be
-/// serialized this becomes a one-line change.
+/// `serde_json` rather than `Debug`: a ledger ends up in a bundle field, and
+/// the property #26 asks for is about those bytes, not about a rendering that
+/// merely correlates with them. `to_string` is deterministic over a value here
+/// — struct field order is declaration order and `serde_json::Map` is a
+/// `BTreeMap` — so any difference between two runs is a difference in the
+/// ledgers.
 fn as_bytes(ledgers: &(Vec<Escalation>, Vec<Escalation>)) -> (String, String) {
-    (format!("{:?}", ledgers.0), format!("{:?}", ledgers.1))
+    (
+        serde_json::to_string(&ledgers.0).expect("the enforced ledger serializes"),
+        serde_json::to_string(&ledgers.1).expect("the advisory ledger serializes"),
+    )
 }
 
 proptest! {
@@ -176,25 +184,20 @@ proptest! {
 }
 
 #[test]
-fn the_ledger_cannot_be_serialized_yet() {
-    // Recorded, not endorsed, and deliberately not fixed here.
+fn the_ledger_serializes() {
+    // This test used to assert the opposite, as a tripwire: `EvidenceRef` was
+    // `#[serde(tag = "kind")]`, `Requirement`, `Capability`, `Crate`, `Rule`
+    // and `Path` are newtype variants over strings, and serde cannot tag those
+    // internally — so serializing failed at run time. Every escalation
+    // `account` produces points at a requirement, which put every ledger, every
+    // `Adjudication` and every bundle carrying one out of reach of JSON. The
+    // tripwire was written to fail the day someone fixed that. Someone did:
+    // `reason.rs` is adjacently tagged now, `as_bytes` above compares real
+    // bytes, and #21's byte-identical-bundle claim has one fewer blocker.
     //
-    // `EvidenceRef` is `#[serde(tag = "kind")]`, and `Requirement`,
-    // `Capability`, `Crate`, `Rule` and `Path` are newtype variants over
-    // strings. Serde cannot internally tag those, so serializing one fails at
-    // run time rather than at compile time. Every escalation `account` produces
-    // points at a requirement, so no ledger, no `Adjudication`, and no bundle
-    // carrying one can reach JSON as things stand.
-    //
-    // It is asserted here for two reasons: it is why the tests above compare
-    // `Debug` output rather than bytes off the wire, and it blocks #21's
-    // byte-identical-bundle claim on its own, independently of accounting
-    // order. Fixing it is a wire-format decision about a frozen type and
-    // belongs to whoever owns `reason.rs`.
-    //
-    // When it is fixed this test fails. That is the intent: switch `as_bytes`
-    // to `serde_json::to_string`, delete this test, and #21 has one fewer
-    // blocker.
+    // It stays as a positive assertion because `as_bytes` depends on it. If
+    // serializing regresses, the properties above fail on an `expect` in a
+    // helper, which says nothing about why; this fails on the actual claim.
     let mut resolutions = Resolutions::new();
     resolutions.insert(
         RequirementId::new("req_apple"),
@@ -206,11 +209,12 @@ fn the_ledger_cannot_be_serialized_yet() {
     let ledger = adjudicators.finish().0.into_adjudication().escalations;
     assert_eq!(ledger.len(), 1);
 
-    assert!(
-        serde_json::to_string(&ledger).is_err(),
-        "`EvidenceRef::Requirement` now serializes — switch `as_bytes` to \
-         `serde_json::to_string`, delete this test, and record on #21 that the \
-         ledger can finally be compared as bytes off the wire"
+    let json = serde_json::to_string(&ledger).expect("the ledger serializes");
+    let back: Vec<Escalation> = serde_json::from_str(&json).expect("and deserializes");
+    assert_eq!(
+        back, ledger,
+        "the bytes `as_bytes` compares are a faithful rendering of the ledger, \
+         not a lossy one that two different ledgers could share"
     );
 }
 
