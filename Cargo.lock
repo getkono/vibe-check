@@ -1500,12 +1500,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "karet-filetype"
-version = "0.6.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4afcb49968f0d210ae9140f2359630323b4b084024ba383b272f9559964b3d4c"
-
-[[package]]
 name = "karet-vcs"
 version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2281,6 +2275,7 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "vibe-check-diff",
  "vibe-check-host",
  "vibe-check-model",
  "vibe-check-testkit",
@@ -2291,12 +2286,8 @@ name = "vibe-check-diff"
 version = "0.1.0"
 dependencies = [
  "camino",
- "jiff",
- "karet-filetype",
  "karet-vcs",
- "thiserror",
  "vibe-check-host",
- "vibe-check-model",
  "vibe-check-testkit",
 ]
 

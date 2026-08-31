@@ -38,6 +38,7 @@ categories   = ["development-tools", "command-line-utilities"]
 # published these gain `version =` pins; see the publish decision in the plan.
 vibe-check-model   = { path = "crates/vibe-check-model" }
 vibe-check-host    = { path = "crates/vibe-check-host" }
+vibe-check-diff    = { path = "crates/vibe-check-diff" }
 vibe-check-testkit = { path = "crates/vibe-check-testkit" }
 
 # --- reused from getkono/karet ----------------------------------------------
