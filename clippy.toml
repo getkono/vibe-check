@@ -20,5 +20,7 @@ disallowed-types = [
 disallowed-methods = [
   { path = "std::time::SystemTime::now", reason = "time-dependent decisions (skip `expires`, artifact freshness) must read the head commit's committer date so verdicts replay identically; only the `clock` module may read the wall clock" },
   { path = "std::time::Instant::now", reason = "durations are display-only and excluded from digests; measure inside the `clock` module" },
+  { path = "jiff::Timestamp::now", reason = "the wall clock the workspace actually reads; same rule as `SystemTime::now`, and the reason this list exists at all is that `clock` is written against jiff, not std" },
+  { path = "jiff::Zoned::now", reason = "reads the wall clock *and* the runner's `TZ`, so it can move a date by a day; decision times are pinned to UTC via `DecisionTime::utc_date`" },
   { path = "std::fs::read_dir", reason = "directory order is filesystem-dependent; use the `fs` wrapper, which collects and sorts" },
 ]

@@ -42,6 +42,7 @@ pub mod reason;
 pub mod resolution;
 pub mod schema;
 pub mod tier;
+pub mod time;
 
 pub use adjudicate::{
     Adjudication, Adjudicator, Adjudicators, AdvisoryAdjudication, EnforcedAdjudication,
@@ -64,3 +65,4 @@ pub use resolution::{
 };
 pub use schema::SchemaVersion;
 pub use tier::{Tier, Verdict};
+pub use time::DecisionTime;

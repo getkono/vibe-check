@@ -184,12 +184,19 @@ Three parts:
 Enforced prophylactically by `clippy.toml`, which bans `HashMap` and `HashSet`
 (unspecified iteration order), `Path` and `PathBuf` (a lossily converted
 non-UTF-8 path silently changes crate attribution), and the methods
-`SystemTime::now`, `Instant::now`, and `fs::read_dir`.
+`SystemTime::now`, `Instant::now`, `jiff::Timestamp::now`, `jiff::Zoned::now`,
+and `fs::read_dir`. The two jiff entries are the ones that bite: this workspace
+reads time through jiff, so banning only the `std` pair left the lint decorative
+in exactly the crate that reads a clock. `Zoned::now` is listed separately
+because it also reads the runner's `TZ`, which can move a civil date by a day.
 
 Enforcing files: `crates/vibe-check-host/src/vcs.rs` — `Vcs::committer_date` is
-the decision clock; `crates/vibe-check-host/src/clock.rs` — the sanctioned
-wall-clock exception, whose every field is on the digest's exclusion list and is
-display-only; `crates/vibe-check/src/assembly.rs` and
+the decision clock; `crates/vibe-check-model/src/time.rs` — `DecisionTime`, the
+only shape that date may take once it is inside the model, with no `now`, no
+`Default`, no `From<Timestamp>`, and a civil date pinned to UTC so a runner's
+`TZ` cannot move an expiry; `crates/vibe-check-host/src/clock.rs` — the
+sanctioned wall-clock exception, whose every field is on the digest's exclusion
+list and is display-only; `crates/vibe-check/src/assembly.rs` and
 `crates/vibe-check-model/src/bundle.rs` — `BTreeSet` and `BTreeMap` in
 everything that reaches a digest; `crates/vibe-check/src/scheduler.rs` — sorts
 completion order away, because how long each tool happened to take is not
