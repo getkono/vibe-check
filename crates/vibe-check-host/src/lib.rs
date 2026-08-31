@@ -44,6 +44,7 @@ pub use exec::{
 pub use forge::{
     Artifact, ArtifactMeta, CheckConclusion, CheckRequest, CheckRun, CommentId, CommentMarker,
     ForgeError, ForgeRead, ForgeResult, ForgeWrite, NullForge, PullRequest, RepoId, RunRef,
+    RunStatus, WorkflowRun,
 };
 pub use scheduler::{Dispatch, Leaf, Scheduler};
 pub use vcs::{ChangeKind, FileChange, Vcs, VcsError};
