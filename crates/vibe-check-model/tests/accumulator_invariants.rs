@@ -1,10 +1,16 @@
 //! Structural guards on the escalation accumulator.
 //!
-//! The claim that "verdicts only ever move up in scrutiny" rests on two things
-//! that are true of the *source file*, not of any value:
+//! The claim that "verdicts only ever move up in scrutiny" rests on things that
+//! are true of the *source files*, not of any value:
 //!
 //! 1. `escalate` is the only method that can mutate an `Adjudicator`.
 //! 2. `adjudicate::accumulator` has no child modules.
+//! 3. `adjudicate::enforcement` has no child modules either, for the same
+//!    reason: `Adjudicators` holds its two ledgers as private fields, and a
+//!    child could swap them or hand out the advisory one under another name.
+//! 4. `Adjudicators::route` is not `pub`, so the advisory ledger is not
+//!    nameable from outside this crate.
+//! 5. `AdvisoryAdjudication` yields no verdict.
 //!
 //! The second one is easy to miss in review. Rust's field privacy is
 //! module-scoped, so a private field is reachable from every descendant module —
@@ -18,6 +24,7 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 const ACCUMULATOR: &str = include_str!("../src/adjudicate/accumulator.rs");
+const ENFORCEMENT: &str = include_str!("../src/adjudicate/enforcement.rs");
 const KNOWN: &str = include_str!("../src/known.rs");
 
 /// Everything before `#[cfg(test)]`, so a module's own tests do not count.
@@ -73,6 +80,22 @@ fn struct_body<'a>(source: &'a str, name: &str) -> &'a str {
     &rest[..end]
 }
 
+/// The body of an inherent `impl` block for a named type.
+///
+/// Ends at the first line that is a bare `}` in the first column, which is the
+/// shape rustfmt gives every top-level item. The alternative is a brace counter
+/// that would have to know about braces inside string literals.
+fn impl_block<'a>(source: &'a str, name: &str) -> &'a str {
+    let needle = format!("impl {name} {{");
+    let start = source
+        .find(&needle)
+        .unwrap_or_else(|| panic!("`impl {name}` must be declared in this file"))
+        + needle.len();
+    let rest = &source[start..];
+    let end = rest.find("\n}").expect("the impl block is closed");
+    &rest[..end]
+}
+
 /// Module declarations in a source file.
 fn submodules(source: &str) -> Vec<&str> {
     non_test_source(source)
@@ -109,6 +132,64 @@ fn the_accumulator_module_has_no_children() {
          Rust field privacy is module-scoped, so a child module can write `tier` \
          directly and bypass `escalate` entirely. Put new code in a sibling under \
          `adjudicate/`, where it has to go through the public API."
+    );
+}
+
+#[test]
+fn the_enforcement_module_has_no_children() {
+    // `Adjudicators` holds `enforcing` and `advisory` as private fields of the
+    // same type. A child module could swap them, or return `&mut self.advisory`
+    // from something called `integrity`. Either is a downward operation wearing
+    // a different word, and nothing in the type system would object.
+    let declarations = submodules(ENFORCEMENT);
+    assert!(
+        declarations.is_empty(),
+        "`adjudicate::enforcement` must have no submodules, found: {declarations:#?}"
+    );
+}
+
+#[test]
+fn routing_is_not_public() {
+    // `route` picks a ledger without applying the policy-integrity override that
+    // `account` applies first. If it were `pub`, a downstream crate could write
+    // `known.get(adjudicators.route(Enforcement::Advisory))` and resolve an
+    // unknown capability against a ledger nothing enforces — a gate disabled by
+    // typo, which is the exact failure `known.rs` exists to prevent.
+    //
+    // With it `pub(crate)`, the only `&mut Adjudicator` obtainable from outside
+    // this crate is `integrity()`, which is the enforcing ledger. That is what
+    // makes the behavioural tests exhaustive rather than illustrative.
+    let source = code_only(non_test_source(ENFORCEMENT));
+    assert!(
+        !source.contains("pub fn route"),
+        "`Adjudicators::route` must stay `pub(crate)`; routing belongs to \
+         `CapabilityResolution::account`, which applies the policy-integrity \
+         override before choosing a lane"
+    );
+    assert!(
+        source.contains("pub(crate) fn route"),
+        "sanity check: the method this test guards should exist"
+    );
+}
+
+#[test]
+fn the_advisory_adjudication_yields_no_verdict() {
+    // `Adjudicator::finish` always sets `verdict: tier.verdict()`. An advisory
+    // ledger that could hand out its `Adjudication` would therefore hand out a
+    // second, more permissive verdict, and a bundle carrying two verdicts is a
+    // bundle whose readers will disagree about what happened.
+    let source = code_only(non_test_source(ENFORCEMENT));
+    let block = impl_block(&source, "AdvisoryAdjudication");
+    for forbidden in ["fn verdict", "-> Adjudication", "Adjudication {"] {
+        assert!(
+            !block.contains(forbidden),
+            "`AdvisoryAdjudication` must not expose `{forbidden}`; only the \
+             enforced ledger becomes a verdict"
+        );
+    }
+    assert!(
+        block.contains("fn tier"),
+        "sanity check: the impl block this test scans should have been found"
     );
 }
 
