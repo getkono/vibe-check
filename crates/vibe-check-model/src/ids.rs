@@ -250,10 +250,12 @@ pub enum LeafIdError {
 /// Each hop is a chance to get the encoding wrong, and two of them are shell and
 /// workflow-expression contexts. The alphabet here is the intersection of what
 /// survives all of them and what GitHub accepts as an artifact-name suffix: no
-/// uppercase (artifact names are matched case-insensitively, so two ids
-/// differing only in case would collide), no `/` or `\` or `:` (rejected
-/// outright in an artifact name), no whitespace, and nothing a shell would
-/// expand.
+/// `/`, `\`, or `:`, which an artifact name rejects outright; no whitespace,
+/// which splits an argument; nothing a shell would expand; and no uppercase,
+/// because an artifact is eventually unpacked onto a filesystem and the macOS
+/// and Windows runners are case-insensitive — so two ids differing only in case
+/// would collide there and not on Linux, which is the worst way for a
+/// uniqueness bug to present.
 ///
 /// # Uniqueness
 ///

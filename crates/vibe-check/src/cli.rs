@@ -89,15 +89,16 @@ pub enum Command {
     Run {
         /// Which leaf of the plan to run.
         ///
-        /// Parsed into a [`LeafId`] here rather than downstream, so a malformed
-        /// identifier fails at argument parsing and names the offending
-        /// character — instead of surfacing three steps later as an artifact
+        /// Lowercase letters, digits, `.`, `_`, and `-`, starting with a letter
+        /// or a digit, and at most 64 characters long. Checked here rather than
+        /// downstream, so a malformed identifier is reported with the offending
+        /// character rather than surfacing three steps later as an artifact
         /// nobody uploaded.
-        ///
-        /// A closure rather than `LeafId::new_checked` directly: the
-        /// constructor is generic over `impl AsRef<str>`, so as a function item
-        /// it is bound to one lifetime and clap needs a parser that works for
-        /// any.
+        //
+        // This doc comment is `--help` text, so the reason for the closure goes
+        // here instead: `LeafId::new_checked` is generic over `impl AsRef<str>`,
+        // so as a function item it binds one lifetime, and clap needs a parser
+        // that works for any.
         #[arg(long, value_parser = |raw: &str| LeafId::new_checked(raw))]
         id: LeafId,
     },
