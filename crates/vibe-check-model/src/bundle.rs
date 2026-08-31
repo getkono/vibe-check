@@ -61,12 +61,22 @@ pub struct BundleCore {
     pub tier: Tier,
     /// The verdict, derived from the tier.
     pub verdict: Verdict,
-    /// The tier the advisory ledger reached. Never contributes to `tier`.
+    /// The tier the advisory-routed outcomes reached **on their own**. Never
+    /// contributes to `tier`.
     ///
-    /// `tier` is what was enforced; this is what *would* have been enforced had
-    /// every requirement been enforcing. Their disagreement is the measurement
-    /// the escape-rate loop needs, and the only thing distinguishing "nothing
-    /// failed" from "nothing that failed counted".
+    /// This is the join of the advisory lane's escalations and nothing else.
+    /// The enforcing lane's escalations do not enter it, so it is *not* the
+    /// counterfactual on its own:
+    ///
+    /// > The tier that would have been enforced had every requirement been
+    /// > enforcing is `tier.join(advisory_tier)`.
+    ///
+    /// Read it as `advisory_tier` alone and you undercount every bundle whose
+    /// enforcing lane was louder than its advisory lane — including the very
+    /// common case of a run with no advisory requirements at all, where this is
+    /// `t0` while `tier` is whatever was actually enforced. The two fields are
+    /// the measurement together: their disagreement is what distinguishes
+    /// "nothing failed" from "nothing that failed counted".
     ///
     /// Deliberately does **not** escalate when it exceeds `tier`. That would
     /// reintroduce exactly the blocking behaviour advisory exists to remove;
@@ -163,7 +173,15 @@ pub struct Generator {
 /// 2 adopted, 5 run, 1 unverified."* Counting is over **requirements**, not
 /// capabilities: a capability can be adopted for one crate and run for another,
 /// so there is no single state to report for it.
+///
+/// `#[serde(default)]` at the container level, not only on the field that holds
+/// one. The bundle's `confidence` key already defaults when it is *absent*, but
+/// that does nothing for a `confidence` object written before a count existed:
+/// serde would reject the object for the missing field and take the whole
+/// bundle down with it. Counts are additive by nature, and `bundle.rs`'s own
+/// contract is additive-only within a major version.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
 #[non_exhaustive]
 pub struct Confidence {
     /// Total requirements considered.
@@ -297,10 +315,19 @@ mod tests {
     use crate::adjudicate::{Adjudicators, Enforcement};
     use crate::reason::{EvidenceRef, ReasonCode};
 
-    /// A bundle in the state the whole feature exists to make representable:
-    /// nothing enforced failed, and something advisory did.
+    /// A bundle with both ledgers non-empty and at *different* tiers.
+    ///
+    /// `tier` is `t1` and `advisory_tier` is `t2`, so a transposition of the two
+    /// is visible rather than a no-op, and `adjudication` carries a real
+    /// escalation for the round-trip to exercise.
     fn bundle() -> EvidenceBundle {
         let mut adjudicators = Adjudicators::new();
+        adjudicators.route(Enforcement::Enforcing).escalate(
+            Tier::T1,
+            ReasonCode::RuleTierAtLeast,
+            "rule `core-unsafe` requires T1",
+            EvidenceRef::Unattributed,
+        );
         adjudicators.route(Enforcement::Advisory).escalate(
             Tier::T2,
             ReasonCode::CapabilityViolated,
@@ -387,9 +414,34 @@ mod tests {
         let json = serde_json::to_value(bundle()).expect("serialize");
         let core = json.get("core").expect("core present");
 
-        assert_eq!(core.get("tier"), Some(&serde_json::json!("t0")));
+        assert_eq!(core.get("tier"), Some(&serde_json::json!("t1")));
         assert_eq!(core.get("advisory_tier"), Some(&serde_json::json!("t2")));
-        assert_eq!(core.get("verdict"), Some(&serde_json::json!("auto")));
+        assert_eq!(
+            core.get("verdict"),
+            Some(&serde_json::json!("interface-review"))
+        );
+    }
+
+    #[test]
+    fn advisory_tier_is_mandatory_on_the_wire() {
+        // Presence on a bundle we just serialized is not the property that
+        // matters; the property is that a bundle *without* it is not readable.
+        // `Tier` has no `Default` and must not gain one — a defaulted tier is
+        // `T0`-shaped, which is the fail-open the lattice exists to prevent — so
+        // a missing `advisory_tier` must be a parse failure and not a silent
+        // `t0`. This test is what stops someone adding `#[serde(default)]` here
+        // to make an unrelated fixture compile.
+        let mut json = serde_json::to_value(bundle()).expect("serialize");
+        json.get_mut("core")
+            .and_then(serde_json::Value::as_object_mut)
+            .expect("core is an object")
+            .remove("advisory_tier");
+
+        assert!(
+            serde_json::from_value::<EvidenceBundle>(json).is_err(),
+            "a bundle whose core omits `advisory_tier` must fail to parse, not \
+             default to the most permissive tier"
+        );
     }
 
     #[test]
@@ -398,10 +450,46 @@ mod tests {
         // "everything passed" or "everything that failed was advisory", and no
         // reader could tell which. That ambiguity would be permanent: `core` is
         // the one part of the bundle that cannot be changed later.
-        let core = bundle().core;
+        let mut adjudicators = Adjudicators::new();
+        adjudicators.route(Enforcement::Advisory).escalate(
+            Tier::T2,
+            ReasonCode::CapabilityViolated,
+            "`mutants-in-diff-killed` failed: 3 mutants survived",
+            EvidenceRef::Unattributed,
+        );
+        let (enforced, advisory) = adjudicators.finish();
+        let core = BundleCore::new(
+            "vc_test".into(),
+            "getkono/kono".into(),
+            None,
+            "9f3c".into(),
+            "master".into(),
+            "1a77".into(),
+            Vec::new(),
+            BTreeMap::new(),
+            "blake3:7c1e".into(),
+            &enforced,
+            &advisory,
+        );
+
         assert_eq!(core.tier, Tier::T0);
         assert_eq!(core.verdict, Verdict::Auto);
         assert_eq!(core.advisory_tier, Tier::T2);
+    }
+
+    #[test]
+    fn the_counterfactual_tier_is_the_join_of_the_two_fields() {
+        // The reading the field documentation now spells out. `advisory_tier`
+        // alone is *not* "what would have been enforced had every requirement
+        // been enforcing": the advisory ledger never sees the enforcing lane, so
+        // in this bundle it is `t2` while the enforcing lane independently
+        // reached `t1`. A consumer reading `advisory_tier` as the counterfactual
+        // undercounts every run whose enforcing lane was the louder of the two.
+        let core = bundle().core;
+        assert_eq!(core.tier, Tier::T1);
+        assert_eq!(core.advisory_tier, Tier::T2);
+        assert_eq!(core.tier.join(core.advisory_tier), Tier::T2);
+        assert!(core.tier.join(core.advisory_tier) >= core.tier);
     }
 
     #[test]
@@ -467,6 +555,28 @@ mod tests {
             .remove("advisory_escalations");
         let parsed: EvidenceBundle = serde_json::from_value(older).expect("deserialize");
         assert!(parsed.advisory_escalations.is_empty());
+    }
+
+    #[test]
+    fn a_confidence_object_written_before_a_count_existed_still_parses() {
+        // `EvidenceBundle.confidence`'s `#[serde(default)]` only fires when the
+        // key is *absent*. A `confidence` object that is present but predates a
+        // count would otherwise fail on the missing field and take the entire
+        // bundle down with it — which is exactly the additive-only contract
+        // `bundle.rs` opens by stating.
+        let mut json = serde_json::to_value(bundle()).expect("serialize");
+        json.get_mut("confidence")
+            .and_then(serde_json::Value::as_object_mut)
+            .expect("confidence is an object")
+            .remove("advisory");
+
+        let parsed: EvidenceBundle = serde_json::from_value(json)
+            .expect("a confidence object missing a count must still parse");
+        assert_eq!(parsed.confidence.advisory, 0);
+        assert_eq!(
+            parsed.confidence.requirements, 3,
+            "the counts that were present must survive"
+        );
     }
 
     #[test]

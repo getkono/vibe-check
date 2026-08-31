@@ -89,8 +89,8 @@ impl Enforcement {
 ///
 /// The enforcing ledger becomes the verdict. The advisory ledger becomes
 /// [`BundleCore::advisory_tier`](crate::bundle::BundleCore::advisory_tier) and
-/// nothing else — it is the measurement that distinguishes "nothing failed"
-/// from "nothing that failed counted", and it never feeds back into the tier.
+/// [`EvidenceBundle::advisory_escalations`](crate::bundle::EvidenceBundle::advisory_escalations),
+/// and never feeds back into the tier.
 ///
 /// There is intentionally no `Default`, for the same reason
 /// [`Adjudicator`] has none.
@@ -224,8 +224,12 @@ pub struct AdvisoryAdjudication {
 }
 
 impl AdvisoryAdjudication {
-    /// The tier this ledger reached: what would have been enforced had every
-    /// requirement been enforcing.
+    /// The tier the advisory-routed outcomes reached **on their own**.
+    ///
+    /// Not the counterfactual by itself: this ledger never sees the enforcing
+    /// lane's escalations, so the tier that would have been enforced had every
+    /// requirement been enforcing is `enforced.tier().join(advisory.tier())`.
+    /// See `the_advisory_tier_is_not_the_counterfactual_on_its_own`.
     #[must_use]
     pub fn tier(&self) -> Tier {
         self.tier
@@ -417,6 +421,83 @@ mod tests {
         // containment property must exclude policy-integrity resolutions.
         let (deleted, _) = account_all(&[]).finish();
         assert_eq!(deleted.tier(), Tier::BOTTOM);
+    }
+
+    #[test]
+    fn the_advisory_tier_is_not_the_counterfactual_on_its_own() {
+        // The advisory tier is the join of the advisory-routed outcomes and
+        // nothing else. It is tempting to document it as "what would have been
+        // enforced had every requirement been enforcing", and that is false:
+        // this ledger never sees the enforcing lane.
+        //
+        // Here the enforcing lane reaches T1 on a declared waiver while the
+        // advisory lane stays at BOTTOM. Read `advisory_tier` as the
+        // counterfactual and you get T0 — less scrutiny than was actually
+        // enforced, which is not a coherent reading of "had everything counted".
+        //
+        // This matters far beyond a doc comment: `advisory_tier` is in the
+        // frozen core, the escape-rate loop reads it across a repository's whole
+        // history, and a consumer that implements "what would we have blocked"
+        // as `advisory_tier` undercounts every run whose enforcing lane was
+        // louder than its advisory one.
+        let pairs = [
+            (
+                CapabilityResolution::Skipped {
+                    reason: SkipReason::Declared {
+                        policy_ref: PolicyRef {
+                            path: ".vibe-check/policy.toml".into(),
+                            kind: "skip".into(),
+                            id: "macros-no-miri".into(),
+                            blob_sha: None,
+                        },
+                        reason: "proc-macro crate forbids unsafe".into(),
+                        owner: "@kono/platform".into(),
+                        expires: Date::constant(2027, 1, 1),
+                    },
+                },
+                Enforcement::Enforcing,
+            ),
+            (
+                CapabilityResolution::Ran {
+                    evidence: measured(),
+                    judgement: Judgement::Satisfied,
+                },
+                Enforcement::Advisory,
+            ),
+        ];
+
+        let (enforced, advisory) = account_all(&pairs).finish();
+
+        assert_eq!(enforced.tier(), Tier::T1);
+        assert_eq!(
+            advisory.tier(),
+            Tier::BOTTOM,
+            "the advisory lane saw only a satisfied requirement"
+        );
+        assert_eq!(
+            enforced.tier().join(advisory.tier()),
+            Tier::T1,
+            "the counterfactual is the join of the two, and it is never below `tier`"
+        );
+    }
+
+    proptest! {
+        /// The counterfactual is never below what was actually enforced. Stated
+        /// as a property because the false reading — `advisory_tier` alone — is
+        /// exactly the one that violates it, and it violates it silently.
+        #[test]
+        fn the_counterfactual_is_never_below_the_enforced_tier(
+            pairs in prop::collection::vec(
+                (any_non_integrity_resolution(), any_enforcement()),
+                0..24,
+            )
+        ) {
+            let (enforced, advisory) = account_all(&pairs).finish();
+            let counterfactual = enforced.tier().join(advisory.tier());
+
+            prop_assert!(counterfactual >= enforced.tier());
+            prop_assert!(counterfactual >= advisory.tier());
+        }
     }
 
     #[test]

@@ -785,6 +785,13 @@ mod tests {
             UnverifiedReason::Inconclusive {
                 reason: "no data".into(),
             },
+            // #46: `GatesModified` being overrulable by `enforcement = "advisory"`
+            // is a deferred decision, not a settled one. Evidence from a workflow
+            // the change itself modifies is attacker-controlled, and the argument
+            // for admitting it to the advisory lane is that the change also trips
+            // gate-integrity by touching `.vibe-check/`. #46 owns revisiting that;
+            // this assertion records today's behaviour and must not be read as
+            // endorsing it.
             UnverifiedReason::GatesModified {
                 paths: vec![".github/workflows/ci.yml".into()],
             },
