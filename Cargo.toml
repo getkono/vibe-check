@@ -53,9 +53,10 @@ vibe-check-testkit = { path = "crates/vibe-check-testkit" }
 # `default-features = false` is load-bearing, not tidiness: `karet-vcs` defaults
 # to `["signature"]`, which enables `dep:ssh-key`. We never verify a commit
 # signature, and a dependency that parses key material has no business in a
-# process that runs untrusted pull-request code. `cargo tree -p vibe-check-diff`
-# must show neither `ssh-key` nor `ratatui`.
-# NEVER enable the `view` feature on any karet crate — it pulls ratatui.
+# process that runs untrusted pull-request code. NEVER enable the `view` feature
+# on any karet crate either — it pulls ratatui, a terminal UI, into a headless
+# process. Both bans are asserted, not just stated here:
+# `crates/vibe-check-model/tests/no_key_parser_or_tui_in_the_tree.rs`.
 karet-vcs = { version = "0.6.0", default-features = false }
 # NOT declared: karet-core, karet-diff, karet-filetype.
 #
