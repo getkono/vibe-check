@@ -11,7 +11,7 @@
 # vibe-check itself classifies, so we are held to our own standard.
 
 disallowed-types = [
-  { path = "std::collections::HashMap", reason = "iteration order is unspecified and leaks into bundles and digests; use BTreeMap, or IndexMap when insertion order is the meaningful order" },
+  { path = "std::collections::HashMap", reason = "iteration order is unspecified and leaks into bundles and digests; use BTreeMap. If insertion order is ever the meaningful order, add `indexmap` back in the same commit as its first use" },
   { path = "std::collections::HashSet", reason = "iteration order is unspecified and leaks into bundles and digests; use BTreeSet" },
   { path = "std::path::Path", reason = "non-UTF-8 paths must be rejected explicitly, never lossily converted, because a lossy path silently changes crate attribution; use camino::Utf8Path (FFI boundaries may allow this lint)" },
   { path = "std::path::PathBuf", reason = "use camino::Utf8PathBuf; see std::path::Path" },
