@@ -24,9 +24,12 @@
 //!
 //! A panic can happen before the repository, the head commit, or the merge base
 //! have been resolved, and the whole point of this path is that it cannot fail.
-//! Every identity field therefore carries [`UNKNOWN`] rather than a
+//! Each of those four fields therefore carries [`UNKNOWN`] rather than a
 //! best-effort guess: a bundle that says `head_sha: "unknown"` is honest, while
 //! one that says `head_sha: "HEAD"` is a claim nobody checked.
+//!
+//! `bundle_id` and `verdict_digest` are **not** identity fields and do not get
+//! that sentinel — see [`NO_DIGEST`].
 
 use std::collections::BTreeMap;
 use std::future::{Future, poll_fn};
@@ -47,6 +50,32 @@ use crate::{Cli, assembly, exit};
 /// One constant rather than six string literals, so that a reader grepping a
 /// bundle for this value finds the reason it is there attached to it.
 pub const UNKNOWN: &str = "unknown";
+
+/// The value a panic bundle carries where a digest would go.
+///
+/// [`BundleCore::bundle_id`] is documented as "derived from content digests …
+/// so that regenerating the same evaluation yields the same identifier", and
+/// [`BundleCore::verdict_digest`] as "what the replay test compares". Neither
+/// is an identity field, so [`UNKNOWN`] is the wrong answer for them: a
+/// consumer keying a store on `bundle_id` would collapse every crash the tool
+/// ever emits into one row, and a replay recomputing `verdict_digest` would
+/// read a mismatch as a *tampered* bundle rather than as one that carries no
+/// digest.
+///
+/// # Why a sentinel rather than a real digest
+///
+/// Computing one would mean defining the canonical form the digest is taken
+/// over — the algorithm every future bundle is compared by — from inside a
+/// crash path. That belongs to the milestone that writes the first real
+/// bundle, and a value sitting in the `blake3:` namespace but produced by a
+/// different function is worse than an obviously absent one, because it looks
+/// authoritative to a consumer that has no way to tell.
+///
+/// So this deliberately sits **outside** that namespace. Anything parsing
+/// `blake3:<hex>` rejects it on sight, which is the outcome we want: not a
+/// mismatch, not a collision, but "this bundle carries no digest, and here is
+/// why".
+pub const NO_DIGEST: &str = "none:internal-panic";
 
 /// The environment variable that asks `run` to panic on purpose.
 ///
@@ -134,10 +163,26 @@ pub fn install() {
 
 /// Run a parsed command, returning the process exit code, and never panicking.
 ///
-/// The one function both binaries call. Every outcome — a verdict, an error, a
-/// panic, and a panic *while reporting* a panic — leaves through here as a `u8`
-/// the caller passes to `std::process::exit`, so neither shim has to know that
-/// any of this happened.
+/// The one function both binaries call. Every outcome that gets this far — a
+/// verdict, an error, a panic, and a panic *while reporting* a panic — leaves
+/// through here as a `u8` the caller passes to `std::process::exit`, so
+/// neither shim has to know that any of this happened.
+///
+/// # What this cannot cover
+///
+/// **Anything before the call.** Argument parsing happens in the binaries, and
+/// clap exits `2` itself on a bad command line. That is why both shims read
+/// `args_os` rather than `args`: the `String` iterator *panics* on a non-UTF-8
+/// argument, and a panic raised before this function is entered escapes as
+/// `101` with no bundle.
+///
+/// **A process killed by a signal.** If stderr cannot be written — a full disk,
+/// a closed log — the panic hook's own report fails, and a panic while
+/// panicking aborts. `SIGABRT` is not an exit code and is outside every exit
+/// table; no `u8` returned from here can describe it. The writes *this* module
+/// performs are all fallible-and-ignored for that reason, so they contribute
+/// nothing to the risk, but the hook that prints the crash report is
+/// `color_eyre`'s and is not ours to make infallible.
 pub async fn run_guarded(cli: Cli) -> u8 {
     match caught(crate::run(cli)).await {
         Ok(Ok(code)) => code,
@@ -145,7 +190,11 @@ pub async fn run_guarded(cli: Cli) -> u8 {
             // Report the failure, then exit with the reserved failure code.
             // Never 0, and never a verdict code: "we could not tell" is not a
             // verdict, and a pipeline must be able to tell the difference.
-            eprintln!("{report:?}");
+            //
+            // `writeln!` and not `eprintln!`: the macro panics if the write
+            // fails, and a full disk turning an ordinary error into an abort is
+            // a worse outcome than a diagnostic nobody reads.
+            let _ = writeln!(std::io::stderr(), "{report:?}");
             exit::FAILURE
         }
         // A panic while handling the panic is still a failure, and still not
@@ -162,9 +211,18 @@ pub async fn run_guarded(cli: Cli) -> u8 {
 /// and it is never polled again after a panic — a future that unwound mid-poll
 /// has no defined state to resume from.
 ///
-/// `AssertUnwindSafe` is correct here for the reason it is usually wrong: the
-/// only state that outlives the panic is [`FIRST_PANIC`], which the hook wrote
-/// and nothing mutates afterwards.
+/// # `AssertUnwindSafe`, at two call sites that differ
+///
+/// From [`run_guarded`] the assertion is trivially correct: the process writes
+/// a bundle and exits, so the only state that outlives the panic is
+/// [`FIRST_PANIC`], which the hook wrote and nothing mutates afterwards.
+///
+/// From [`crate::scheduler`] it is a real claim, because the process *keeps
+/// going*: the surviving leaves hold the same `Arc<dyn Exec>` the panicking one
+/// did. It holds today because no `Exec` implementation carries interior
+/// mutability across an await. A future one that panicked while holding a lock
+/// would poison it, and the leaves after it would see the broken half-state
+/// this type is normally there to warn about. Weigh that when adding one.
 pub(crate) async fn caught<F: Future>(future: F) -> Result<F::Output, Panicked> {
     let mut future = Box::pin(future);
     poll_fn(move |cx| {
@@ -209,11 +267,22 @@ fn report() -> u8 {
         "a panic whose location was not recorded — the hook was replaced or never installed"
             .to_owned()
     });
-    eprintln!("vibe-check panicked: {detail}");
+    // Every write here is fallible-and-ignored. The `println!`/`eprintln!`
+    // macros panic when the write fails, and this function is the last thing
+    // standing between a crash and an exit code — a full disk must not turn a
+    // reported panic into an abort with no status at all.
+    let _ = writeln!(std::io::stderr(), "vibe-check panicked: {detail}");
 
     match serde_json::to_string_pretty(&minimal_bundle(&detail)) {
-        Ok(json) => println!("{json}"),
-        Err(error) => eprintln!("the panic bundle could not be rendered: {error}"),
+        Ok(json) => {
+            let _ = writeln!(std::io::stdout(), "{json}");
+        }
+        Err(error) => {
+            let _ = writeln!(
+                std::io::stderr(),
+                "the panic bundle could not be rendered: {error}"
+            );
+        }
     }
     // `std::process::exit` runs no destructors, so nothing else will flush.
     let _ = std::io::stdout().flush();
@@ -240,7 +309,10 @@ fn minimal_bundle(detail: &str) -> EvidenceBundle {
     EvidenceBundle {
         schema_version: SchemaVersion::BUNDLE,
         core: BundleCore::new(
-            UNKNOWN.to_owned(),
+            // `bundle_id`, then the four identity fields, then
+            // `verdict_digest`. The two digest-shaped ones get `NO_DIGEST`;
+            // the identity ones get `UNKNOWN`.
+            NO_DIGEST.to_owned(),
             UNKNOWN.to_owned(),
             None,
             UNKNOWN.to_owned(),
@@ -248,7 +320,7 @@ fn minimal_bundle(detail: &str) -> EvidenceBundle {
             UNKNOWN.to_owned(),
             Vec::new(),
             BTreeMap::new(),
-            UNKNOWN.to_owned(),
+            NO_DIGEST.to_owned(),
             &enforced,
             &advisory,
         ),
@@ -319,10 +391,32 @@ mod tests {
         assert_eq!(bundle.core.repo, UNKNOWN);
         assert_eq!(bundle.core.head_sha, UNKNOWN);
         assert_eq!(bundle.core.merge_base_sha, UNKNOWN);
+        assert_eq!(bundle.core.base_ref, UNKNOWN);
         assert_eq!(bundle.core.pr, None);
         assert_eq!(bundle.confidence.requirements, 0);
         assert!(bundle.advisory_escalations.is_empty());
         assert_eq!(bundle.core.advisory_tier, Tier::T0);
+    }
+
+    #[test]
+    fn the_digest_fields_are_not_identity_fields() {
+        // `bundle_id` and `verdict_digest` are digests, not identity. Giving
+        // them the identity sentinel would put a value where a consumer expects
+        // one it can key a store on or recompute, and "unknown" is neither
+        // obviously absent nor obviously a digest.
+        let bundle = minimal_bundle("boom");
+        assert_eq!(bundle.core.bundle_id, NO_DIGEST);
+        assert_eq!(bundle.core.verdict_digest, NO_DIGEST);
+        assert_ne!(bundle.core.bundle_id, UNKNOWN);
+
+        // And it must not be mistakable for one. Every digest this workspace
+        // writes lives in the `blake3:` namespace; a replay that recomputed a
+        // digest and compared it against this must reject it as absent rather
+        // than report a mismatch, which reads as tampering.
+        assert!(
+            !NO_DIGEST.starts_with("blake3:"),
+            "the sentinel must sit outside the digest namespace: {NO_DIGEST}"
+        );
     }
 
     #[test]

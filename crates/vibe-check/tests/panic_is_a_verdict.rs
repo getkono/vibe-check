@@ -36,9 +36,46 @@ use std::process::{Command, Output};
 /// instead of silently turning it into an assertion about a normal run.
 const PANIC_HATCH: &str = "VIBE_CHECK_PANIC";
 
-/// Run the binary once, with the panic hatch either set or absent.
+/// Which of the two binaries to spawn.
+///
+/// Both are under test, and the shim is the one that had a hole: it reads the
+/// command line itself, so it can fail in ways `vibe-check` cannot. A test
+/// suite that only ever spawned `vibe-check` would keep saying "both binaries
+/// call the same guarded function" while one of them crashed before reaching
+/// it.
+#[derive(Clone, Copy)]
+enum Binary {
+    /// `vibe-check`, invoked directly.
+    Direct,
+    /// `cargo-vibe-check`, invoked the way cargo invokes it — with the
+    /// subcommand name back in `argv[1]`.
+    CargoShim,
+}
+
+impl Binary {
+    /// A command for this binary, with cargo's inserted argument where the shim
+    /// would see it.
+    fn command(self) -> Command {
+        match self {
+            Self::Direct => Command::new(env!("CARGO_BIN_EXE_vibe-check")),
+            Self::CargoShim => {
+                let mut command = Command::new(env!("CARGO_BIN_EXE_cargo-vibe-check"));
+                command.arg("vibe-check");
+                command
+            }
+        }
+    }
+}
+
+/// Run `vibe-check` once, with the panic hatch either set or absent.
 fn run(panic: bool) -> Output {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_vibe-check"));
+    run_as(Binary::Direct, panic, &[])
+}
+
+/// Run either binary once, with the panic hatch either set or absent.
+fn run_as(binary: Binary, panic: bool, extra: &[&std::ffi::OsStr]) -> Output {
+    let mut command = binary.command();
+    command.args(extra);
     command.arg("classify");
     if panic {
         command.env(PANIC_HATCH, "1");
@@ -172,4 +209,86 @@ fn an_ordinary_failure_is_not_dressed_up_as_a_panic() {
         !String::from_utf8_lossy(&output.stderr).contains("vibe-check panicked"),
         "and it did not panic"
     );
+}
+
+#[test]
+fn the_cargo_shim_takes_the_same_path() {
+    // `cargo vibe-check` is the same invocation through a different entry
+    // point, and the claim this branch makes is that both binaries leave
+    // through one guarded function. Asserted rather than assumed: only the
+    // shim strips an argument, so only the shim can get that wrong.
+    let output = run_as(Binary::CargoShim, true, &[]);
+
+    assert_eq!(output.status.code(), Some(1));
+    let stdout = String::from_utf8(output.stdout).expect("the bundle is UTF-8");
+    let bundle: serde_json::Value = serde_json::from_str(&stdout).expect("one JSON document");
+    assert_eq!(
+        bundle.pointer("/core/verdict"),
+        Some(&serde_json::json!("human"))
+    );
+    assert_eq!(
+        bundle.pointer("/adjudication/escalations/0/reason"),
+        Some(&serde_json::json!("internal-panic"))
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn a_non_utf8_argument_is_rejected_rather_than_crashing() {
+    // The hole this test exists to close. `std::env::args()` panics on a
+    // non-UTF-8 argument, and it is read *before* the guard is entered — so
+    // the panic escaped as 101 with no bundle, in the one binary no test
+    // spawned. Both must now report a usage error instead.
+    use std::os::unix::ffi::OsStrExt;
+
+    let invalid = std::ffi::OsStr::from_bytes(b"--base=\xff");
+    for (name, binary) in [
+        ("vibe-check", Binary::Direct),
+        ("cargo-vibe-check", Binary::CargoShim),
+    ] {
+        let output = run_as(binary, false, &[invalid]);
+        let code = output.status.code();
+
+        assert_ne!(
+            code,
+            Some(101),
+            "{name}: a malformed command line must not crash the process"
+        );
+        assert_eq!(
+            code,
+            Some(2),
+            "{name}: a command line clap cannot read is a usage error\nstderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            output.stdout.is_empty(),
+            "{name}: a usage error writes no bundle"
+        );
+    }
+}
+
+#[test]
+fn the_bundle_carries_no_digest_it_did_not_compute() {
+    // `bundle_id` and `verdict_digest` are digests, and a crash computed
+    // neither. They must be absent in a way a consumer can *see* is absent:
+    // a store keyed on `bundle_id` and a replay recomputing `verdict_digest`
+    // both need to tell "no digest" from "a digest that did not match".
+    let stdout = String::from_utf8(run(true).stdout).expect("the bundle is UTF-8");
+    let bundle: serde_json::Value = serde_json::from_str(&stdout).expect("one JSON document");
+
+    for field in ["bundle_id", "verdict_digest"] {
+        let value = bundle
+            .pointer(&format!("/core/{field}"))
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_else(|| panic!("core.{field} is present and a string"));
+        assert!(
+            !value.starts_with("blake3:"),
+            "core.{field} must not look like a digest this run did not compute: {value}"
+        );
+        assert_ne!(
+            value, "unknown",
+            "core.{field} is a digest, not an identity field, so it must not \
+             carry the identity sentinel"
+        );
+    }
 }
