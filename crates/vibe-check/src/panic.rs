@@ -50,13 +50,43 @@ pub const UNKNOWN: &str = "unknown";
 
 /// The environment variable that asks `run` to panic on purpose.
 ///
-/// A test seam, not a feature: it is absent from `--help`, absent from
-/// `action.yml`, and does nothing unless someone sets it. It exists because the
-/// property this module is for — *a panic exits `1` and emits a `human`
-/// bundle* — is only provable by panicking in a real process, and a
-/// `#[cfg(feature = …)]` hatch would not do: `mise run test` builds with
-/// `--all-features`, so a feature-gated panic would be compiled into the very
-/// binary the gate runs.
+/// A test seam, not a feature: absent from `--help`, absent from `action.yml`,
+/// and compiled out of anything shipped. It exists because the property this
+/// module is for — *a panic exits `1` and emits a `human` bundle* — involves
+/// `catch_unwind`, `set_hook`, and the exit code the operating system reports,
+/// all of which are process-global. Nothing short of panicking in a real
+/// process proves it.
+///
+/// # Why this gate and not the other two
+///
+/// **A cargo feature** is wrong here for a reason specific to this repository:
+/// `mise run test` runs `cargo test --workspace --all-targets --all-features`,
+/// so `#[cfg(feature = "…")]` would be *on* in every build the gate makes. The
+/// hatch would be compiled into the very binary the gate runs, which is the
+/// outcome the gate is supposed to rule out.
+///
+/// **No gate at all** works and is what this shipped as first, but it leaves a
+/// release binary one environment variable away from a deliberate crash. It
+/// fails closed — a forced panic yields `t2`/`human`, the strictest verdict
+/// available, so it is a nuisance rather than a bypass — but a nuisance with a
+/// smaller blast radius available for free is not worth keeping.
+///
+/// **`#[cfg(debug_assertions)]`** is that gate. It is a property of the
+/// *profile*, not of the feature set, so `--all-features` does not reach it:
+///
+/// - `cargo test` builds under the `test` profile, which inherits `dev`, where
+///   `debug_assertions` is on. `CARGO_BIN_EXE_vibe-check` — how
+///   `tests/panic_is_a_verdict.rs` finds the binary — is built under that same
+///   profile, so the hatch is present exactly where the proof needs it.
+/// - `cargo build --release` has `debug_assertions` off, so the hatch and its
+///   `panic!` are not compiled at all.
+///
+/// This holds because no `[profile]` section exists anywhere in the workspace
+/// and there is no `.cargo/config.toml`. A profile that set
+/// `debug-assertions = true` for `release`, or `false` for `test`, would move
+/// the hatch with it — the first would ship it, and the second would delete the
+/// only end-to-end proof that a panic is a verdict. Both directions are worth
+/// noticing before the profile is written.
 pub const PANIC_HATCH: &str = "VIBE_CHECK_PANIC";
 
 /// The first panic observed in this process, as `<payload> at <location>`.
@@ -147,17 +177,26 @@ pub(crate) async fn caught<F: Future>(future: F) -> Result<F::Output, Panicked> 
     .await
 }
 
-/// Panic when [`PANIC_HATCH`] is set in the environment.
+/// Panic when [`PANIC_HATCH`] is set in the environment, in a build that has
+/// debug assertions on.
 ///
 /// Called from [`crate::run`], which is the deepest point that both binaries
 /// share, so the panic it raises travels the same path a real one would.
-// The one function in this crate whose entire purpose is to panic. The
-// workspace-wide ban is lifted here and nowhere else, and the `#[allow]` is
-// scoped to this function so nothing can inherit the exemption.
-#[allow(clippy::panic)]
+///
+/// In a build with debug assertions off — which is every release build, since
+/// this workspace overrides no profile — the body below does not exist and this
+/// is an empty function the optimizer removes. See [`PANIC_HATCH`] for why the
+/// gate is the profile rather than a feature.
 pub(crate) fn panic_if_requested() {
-    if std::env::var_os(PANIC_HATCH).is_some() {
-        panic!("deliberate panic requested by {PANIC_HATCH}");
+    // The one place in this crate whose purpose is to panic. The workspace-wide
+    // ban is lifted here and nowhere else, and the `#[allow]` is scoped to this
+    // block so nothing can inherit the exemption.
+    #[cfg(debug_assertions)]
+    #[allow(clippy::panic)]
+    {
+        if std::env::var_os(PANIC_HATCH).is_some() {
+            panic!("deliberate panic requested by {PANIC_HATCH}");
+        }
     }
 }
 

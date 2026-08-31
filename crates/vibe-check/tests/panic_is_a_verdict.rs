@@ -16,6 +16,16 @@
 //! And the bundle beside them, because the exit code alone says only that
 //! something went wrong. The comment and the check run are what gate a merge in
 //! `mode: enforcing`, and they are rendered from this document.
+//!
+//! # This test requires debug assertions
+//!
+//! The panic is triggered through `VIBE_CHECK_PANIC`, which is compiled in
+//! under `#[cfg(debug_assertions)]` and out of anything shipped. `cargo test`
+//! builds under the `test` profile, which inherits `dev`, and
+//! `CARGO_BIN_EXE_vibe-check` builds the binary under that same profile — so
+//! the hatch is here. Under `cargo test --release` it is not, and these tests
+//! fail with a bundle-less exit 1. That is the tradeoff spelled out on
+//! `PANIC_HATCH`, and the gate (`mise run test`) does not pass `--release`.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
