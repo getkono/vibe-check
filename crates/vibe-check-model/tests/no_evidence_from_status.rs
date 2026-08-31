@@ -553,3 +553,13 @@ fn an_impl_written_inside_a_macro_is_read() {
         "the metavariable stands in for every type the macro is invoked for"
     );
 }
+
+#[test]
+#[should_panic(expected = "could not be re-parsed")]
+fn a_macro_body_this_reader_cannot_parse_is_a_loud_failure() {
+    // Re-parsing macro expansions is only worth anything if a body it cannot
+    // handle stops the guard rather than slipping past it — a silent skip is
+    // exactly the regression the macro fix exists to undo, reintroduced through
+    // the fix's own escape hatch. This is what proves the panic is reachable.
+    let _ = common::read("sample", "macro_rules! partial { ($t:ty) => { impl }; }\n");
+}

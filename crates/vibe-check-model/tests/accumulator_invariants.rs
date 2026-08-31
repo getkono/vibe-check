@@ -781,3 +781,14 @@ fn an_item_inside_a_const_block_is_read() {
     );
     assert_eq!(common::module_declarations(sample.items()), ["helpers"]);
 }
+
+#[test]
+#[should_panic(expected = "cannot classify")]
+fn a_cfg_this_reader_cannot_classify_is_a_loud_failure() {
+    // The other half of the `cfg` fix, and the half that is easy to leave
+    // decorative. Assuming an unreadable gate is test-only is how an item
+    // vanishes from a guard in silence; assuming it ships would be a guard that
+    // fails for reasons nobody can act on. Neither is a guess worth making, so
+    // the reader stops instead — and this is what proves it actually does.
+    let _ = common::read("sample", "#[cfg(1 + 1)]\nmod helpers {}\n");
+}
