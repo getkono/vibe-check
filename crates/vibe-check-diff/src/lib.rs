@@ -14,7 +14,7 @@
 //! are sorted by path. A developer's personal git configuration cannot change
 //! which crate a file is attributed to, and therefore cannot change a verdict.
 //!
-//! # Two constraints this imposes
+//! # The constraint this imposes
 //!
 //! **`gix::Repository` is not `Sync`.** Every git read has to happen on one
 //! thread. That suits the design — the change set is built once, eagerly, before
@@ -22,10 +22,6 @@
 //! so it is stated here and the API is shaped around it: these are plain
 //! blocking functions that open a repository per call, and the caller hoists
 //! them out of any concurrency.
-//!
-//! **`file_at_rev` is not in the published 0.2.2.** It exists upstream but has
-//! not been released. Reading the policy document from the merge base needs it,
-//! so [`blob_at_rev`] carries a local implementation until karet 0.3.0 lands.
 
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
 
@@ -128,48 +124,38 @@ fn to_utf8(path: std::path::PathBuf) -> Result<Utf8PathBuf, VcsError> {
 
 /// Read a file's contents at a revision.
 ///
-/// How the policy document is read from the merge base without disturbing the
-/// working tree, which belongs to the pull request.
+/// `path` is relative to the repository root. How the policy document is read
+/// from the merge base without disturbing the working tree, which belongs to the
+/// pull request.
 ///
-/// Implemented here rather than through karet because `file_at_rev` landed
-/// upstream after the published 0.2.2. Delete this in favour of
-/// `Repository::file_at_rev` when karet 0.3.0 is released.
+/// `Ok(None)` means the path is absent at that revision. That is a normal
+/// answer, not a degenerate one — a pull request that *adds* the policy file has
+/// no policy at the merge base — and keeping it distinct from an unresolvable
+/// revision is why this returns a nested `Option` rather than an empty buffer.
 ///
 /// # Errors
-/// Returns [`VcsError`] when the revision cannot be resolved.
+/// Returns [`VcsError::BadRevision`] when the revision cannot be resolved, and
+/// [`VcsError::Git`] when `path` is not relative.
 pub fn blob_at_rev(
     root: &Utf8Path,
     rev: &str,
     path: &Utf8Path,
 ) -> Result<Option<Vec<u8>>, VcsError> {
-    let output = std::process::Command::new("git")
-        .arg("-C")
-        .arg(root.as_std_path())
-        .arg("cat-file")
-        .arg("blob")
-        .arg(format!("{rev}:{path}"))
-        // A developer's global configuration must not be able to change what we
-        // read, for the same reason it must not change rename detection.
-        .env("GIT_CONFIG_GLOBAL", "/dev/null")
-        .env("GIT_CONFIG_SYSTEM", "/dev/null")
-        .output()
-        .map_err(|e| VcsError::Git(format!("running git cat-file: {e}")))?;
+    // `file_at_rev` takes a path inside the worktree and strips the prefix
+    // itself. Handed a relative path it does not resolve one — it returns
+    // `Ok(None)`, which here would read as "no policy at the merge base" and
+    // send a repository down the bootstrap path with its gates silently off.
+    // Absolutizing is therefore a correctness step, not a convenience, and an
+    // already-absolute argument is rejected rather than joined into nonsense.
+    if path.is_absolute() {
+        return Err(VcsError::Git(format!(
+            "blob_at_rev takes a repository-relative path, got the absolute {path}"
+        )));
+    }
 
-    if output.status.success() {
-        return Ok(Some(output.stdout));
-    }
-    // A path that does not exist at that revision is a normal answer — a pull
-    // request that adds the policy file has no policy at the merge base — and
-    // must not be confused with a revision that does not resolve.
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    if stderr.contains("does not exist") || stderr.contains("exists on disk, but not in") {
-        Ok(None)
-    } else {
-        Err(VcsError::BadRevision(format!(
-            "{rev}:{path} ({})",
-            stderr.trim()
-        )))
-    }
+    open(root)?
+        .file_at_rev(root.join(path).as_std_path(), rev)
+        .map_err(|e| VcsError::BadRevision(format!("{rev}:{path} ({e})")))
 }
 
 #[cfg(test)]
@@ -301,6 +287,21 @@ mod tests {
         let (repo, base, _) = diverged();
         let missing = blob_at_rev(repo.root(), &base, Utf8Path::new("src/new.rs")).expect("read");
         assert!(missing.is_none());
+    }
+
+    #[test]
+    fn an_absolute_path_is_rejected_rather_than_read_as_absent() {
+        // The trap this guards is silent, which is why it is worth a test.
+        // `file_at_rev` resolves a path against the worktree and answers
+        // `Ok(None)` for anything it cannot place there. Absent is a *meaningful*
+        // answer here — it is how a pull request that adds the policy file is
+        // recognised — so a path handed over in the wrong shape would not fail,
+        // it would report that the merge base has no policy, and the change
+        // would be adjudicated with its gates off.
+        let (repo, base, _) = diverged();
+        let absolute = repo.root().join("src/lib.rs");
+        let err = blob_at_rev(repo.root(), &base, &absolute).expect_err("absolute path");
+        assert!(matches!(err, VcsError::Git(_)), "got {err:?}");
     }
 
     #[test]
