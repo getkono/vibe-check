@@ -17,6 +17,7 @@ use async_trait::async_trait;
 use tokio::task::JoinSet;
 use vibe_check_host::exec::Exec;
 use vibe_check_host::scheduler::{Dispatch, Leaf, Scheduler};
+use vibe_check_model::LeafId;
 
 /// Runs leaves on this machine.
 pub struct LocalScheduler {
@@ -76,7 +77,7 @@ impl Scheduler for LocalScheduler {
     }
 }
 
-fn spawn_leaf(set: &mut JoinSet<String>, exec: Arc<dyn Exec>, leaf: Leaf) {
+fn spawn_leaf(set: &mut JoinSet<LeafId>, exec: Arc<dyn Exec>, leaf: Leaf) {
     set.spawn(async move {
         // A tool that fails to run is not an error here. It becomes an
         // unverified capability further up, which escalates. Returning early
@@ -103,11 +104,20 @@ mod tests {
 
     fn leaf(id: &str, program: &str) -> Leaf {
         Leaf {
-            id: id.to_owned(),
+            id: LeafId::new_checked(id).expect("a well-formed fixture leaf id"),
             requirement: RequirementId::new(format!("req_{id}")),
             plan: ProcessPlan::new(program, []),
             lane: LaneId::new("cheap"),
         }
+    }
+
+    /// Leaf identifiers as plain strings, for assertions.
+    ///
+    /// `LeafId` has no `PartialEq<&str>`, deliberately — comparing an unchecked
+    /// string to a checked one is the comparison the type exists to make
+    /// awkward.
+    fn ids(leaf_ids: &[LeafId]) -> Vec<&str> {
+        leaf_ids.iter().map(LeafId::as_str).collect()
     }
 
     #[tokio::test]
@@ -121,12 +131,10 @@ mod tests {
                 leaf("c", "cargo"),
             ])
             .await;
-        assert_eq!(
-            dispatch,
-            Dispatch::Completed {
-                leaf_ids: vec!["a".into(), "b".into(), "c".into()],
-            }
-        );
+        let Dispatch::Completed { leaf_ids } = dispatch else {
+            panic!("local scheduling completes in place");
+        };
+        assert_eq!(ids(&leaf_ids), ["a", "b", "c"]);
         assert_eq!(exec.calls().len(), 3);
     }
 
@@ -146,7 +154,7 @@ mod tests {
         };
         // Sorted, not in completion order: a verdict must not depend on which
         // tool happened to finish first.
-        assert_eq!(leaf_ids, ["a", "m", "z"]);
+        assert_eq!(ids(&leaf_ids), ["a", "m", "z"]);
     }
 
     #[tokio::test]
@@ -166,7 +174,7 @@ mod tests {
         let Dispatch::Completed { leaf_ids } = dispatch else {
             panic!("local scheduling completes in place");
         };
-        assert_eq!(leaf_ids, ["also-good", "good", "missing"]);
+        assert_eq!(ids(&leaf_ids), ["also-good", "good", "missing"]);
     }
 
     #[tokio::test]
@@ -187,11 +195,9 @@ mod tests {
         let exec = Arc::new(FakeExec::new().with_success("cargo", Vec::new()));
         let scheduler = LocalScheduler::new(Arc::clone(&exec) as Arc<dyn Exec>).with_concurrency(0);
         let dispatch = scheduler.dispatch(vec![leaf("only", "cargo")]).await;
-        assert_eq!(
-            dispatch,
-            Dispatch::Completed {
-                leaf_ids: vec!["only".into()],
-            }
-        );
+        let Dispatch::Completed { leaf_ids } = dispatch else {
+            panic!("local scheduling completes in place");
+        };
+        assert_eq!(ids(&leaf_ids), ["only"]);
     }
 }

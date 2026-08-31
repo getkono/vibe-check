@@ -47,8 +47,8 @@ pub use evidence::{
     Provenance, RawRef, Severity,
 };
 pub use ids::{
-    AdoptionSourceId, AnalyzerId, CapabilityId, CrateId, FactKey, LaneId, MetricKey, ParserId,
-    RequirementId, RiskFlagId, RuleId,
+    AdoptionSourceId, AnalyzerId, CapabilityId, CrateId, FactKey, LaneId, LeafId, LeafIdError,
+    MetricKey, ParserId, RequirementId, RiskFlagId, RuleId,
 };
 pub use known::{Known, UnknownKind};
 pub use location::{LineRange, Location};
