@@ -17,13 +17,18 @@
 //!
 //! - an unverified capability escalates to [`Tier::TOP`]
 //! - a human-authored waiver escalates to [`Tier::T1`]
+//! - an unknown identifier is a fact about the *policy*, not a result about the
+//!   code, and policy integrity is never advisory
 //!
-//! Because there is one consumer, there is one place to audit.
+//! Because there is one consumer, there is one place to audit. That is also why
+//! choosing between the enforced and advisory ledgers happens here rather than
+//! at call sites: it is one of the fail-closed rules, and it belongs next to the
+//! others.
 
 use jiff::civil::Date;
 use serde::{Deserialize, Serialize};
 
-use crate::adjudicate::Adjudicator;
+use crate::adjudicate::{Adjudicators, Enforcement};
 use crate::evidence::Evidence;
 use crate::ids::{CapabilityId, ParserId, RequirementId};
 use crate::reason::{EvidenceRef, PolicyRef, ReasonCode};
@@ -212,6 +217,36 @@ impl UnverifiedReason {
         }
     }
 
+    /// Whether this is a fact about the **policy** rather than about the code.
+    ///
+    /// Never advisory. `enforcement = "advisory"` written next to a typo'd
+    /// capability name would otherwise be a two-token gate disable: the
+    /// requirement names something this build cannot evaluate, the failure to
+    /// evaluate it lands in a ledger nothing enforces, and the gate is gone.
+    /// [`CapabilityResolution::account`] overrides the caller's
+    /// [`Enforcement`] to the enforcing lane whenever this is true.
+    ///
+    /// An exhaustive `match` rather than a `matches!`, so that a new
+    /// [`UnverifiedReason`] variant has to be classified by whoever adds it.
+    #[must_use]
+    pub fn is_policy_integrity(&self) -> bool {
+        match self {
+            Self::UnknownCapability { .. } | Self::UnknownParser { .. } => true,
+            Self::Unparseable { .. }
+            | Self::NoArtifact { .. }
+            | Self::MissingEvidence
+            | Self::StaleArtifact { .. }
+            | Self::GatesModified { .. }
+            | Self::BudgetExceeded { .. }
+            | Self::Inconclusive { .. }
+            | Self::ExecutionFailed { .. }
+            | Self::PlanFailed { .. }
+            | Self::NoForge
+            | Self::SchemaTooNew { .. }
+            | Self::Oversized { .. } => false,
+        }
+    }
+
     /// A sentence a maintainer can act on.
     #[must_use]
     pub fn detail(&self) -> String {
@@ -344,24 +379,53 @@ impl CapabilityResolution {
         }
     }
 
+    /// Whether this resolution is a fact about the policy rather than about the
+    /// code, and therefore may never be routed to the advisory ledger.
+    ///
+    /// An exhaustive `match` rather than a `_` arm: a fifth resolution state
+    /// would have to be classified here before it compiles.
+    fn is_policy_integrity(&self) -> bool {
+        match self {
+            Self::Unverified { reason } => reason.is_policy_integrity(),
+            Self::Adopted { .. } | Self::Ran { .. } | Self::Skipped { .. } => false,
+        }
+    }
+
     /// Apply this resolution to the verdict.
     ///
     /// **The only consumer of a resolution**, and therefore the only place the
     /// fail-closed rules need to be correct:
     ///
-    /// | resolution | effect |
-    /// |---|---|
-    /// | satisfied, from measured evidence | nothing |
-    /// | violated | escalate to [`Tier::TOP`] |
-    /// | inconclusive | escalate to [`Tier::TOP`] — an inconclusive result is not a pass |
-    /// | satisfied, but only *declared* | escalate to [`Tier::TOP`] — an assertion is not a measurement |
-    /// | engine-derived skip | nothing |
-    /// | policy-declared waiver | escalate to [`Tier::T1`] |
-    /// | unverified | escalate to [`Tier::TOP`] |
+    /// | resolution | enforcement | effect |
+    /// |---|---|---|
+    /// | satisfied, from measured evidence | either | nothing |
+    /// | violated | as given | escalate that ledger to [`Tier::TOP`] |
+    /// | inconclusive | as given | escalate that ledger to [`Tier::TOP`] — an inconclusive result is not a pass |
+    /// | satisfied, but only *declared* | as given | escalate that ledger to [`Tier::TOP`] — an assertion is not a measurement |
+    /// | engine-derived skip | either | nothing |
+    /// | policy-declared waiver | as given | escalate that ledger to [`Tier::T1`] |
+    /// | unverified | as given | escalate that ledger to [`Tier::TOP`] |
+    /// | unverified, unknown capability or parser | **overridden** | escalate the *enforced* ledger to [`Tier::TOP`] |
     ///
     /// Note there is no path through this function in which an unanswered
-    /// question leaves the tier alone.
-    pub fn account(&self, requirement: &RequirementId, adjudicator: &mut Adjudicator) {
+    /// question leaves both tiers alone, and no path in which a fact about the
+    /// policy reaches the advisory ledger.
+    pub fn account(
+        &self,
+        requirement: &RequirementId,
+        enforcement: Enforcement,
+        adjudicators: &mut Adjudicators,
+    ) {
+        // The routing rule, and the only line of this function that is new. An
+        // unknown identifier is a fact about the policy; policy integrity is
+        // never advisory, whatever the requirement asked for.
+        let lane = if self.is_policy_integrity() {
+            Enforcement::Enforcing
+        } else {
+            enforcement
+        };
+        let adjudicator = adjudicators.route(lane);
+
         let evidence_ref = EvidenceRef::Requirement(requirement.clone());
         match self {
             Self::Adopted {
@@ -469,19 +533,30 @@ mod tests {
         })
     }
 
-    fn verdict_of(resolution: &CapabilityResolution) -> Verdict {
-        let mut adj = Adjudicator::new();
-        resolution.account(&requirement(), &mut adj);
-        adj.finish().verdict
+    /// The two tiers this resolution produces under `enforcement`.
+    fn tiers_of(resolution: &CapabilityResolution, enforcement: Enforcement) -> (Tier, Tier) {
+        let mut adjudicators = Adjudicators::new();
+        resolution.account(&requirement(), enforcement, &mut adjudicators);
+        let (enforced, advisory) = adjudicators.finish();
+        (enforced.tier(), advisory.tier())
+    }
+
+    fn verdict_of(resolution: &CapabilityResolution, enforcement: Enforcement) -> Verdict {
+        let mut adjudicators = Adjudicators::new();
+        resolution.account(&requirement(), enforcement, &mut adjudicators);
+        adjudicators.finish().0.verdict()
     }
 
     #[test]
     fn satisfied_measured_evidence_leaves_the_verdict_alone() {
         assert_eq!(
-            verdict_of(&CapabilityResolution::Ran {
-                evidence: measured(),
-                judgement: Judgement::Satisfied,
-            }),
+            verdict_of(
+                &CapabilityResolution::Ran {
+                    evidence: measured(),
+                    judgement: Judgement::Satisfied,
+                },
+                Enforcement::Enforcing
+            ),
             Verdict::Auto
         );
     }
@@ -537,9 +612,12 @@ mod tests {
         for reason in reasons {
             let detail = reason.detail();
             assert_eq!(
-                verdict_of(&CapabilityResolution::Unverified {
-                    reason: reason.clone()
-                }),
+                verdict_of(
+                    &CapabilityResolution::Unverified {
+                        reason: reason.clone()
+                    },
+                    Enforcement::Enforcing
+                ),
                 Verdict::Human,
                 "{reason:?} must escalate"
             );
@@ -562,12 +640,15 @@ mod tests {
     #[test]
     fn an_inconclusive_answer_is_not_a_pass() {
         assert_eq!(
-            verdict_of(&CapabilityResolution::Ran {
-                evidence: measured(),
-                judgement: Judgement::Inconclusive {
-                    reason: "added tests do not compile against base".into()
+            verdict_of(
+                &CapabilityResolution::Ran {
+                    evidence: measured(),
+                    judgement: Judgement::Inconclusive {
+                        reason: "added tests do not compile against base".into()
+                    },
                 },
-            }),
+                Enforcement::Enforcing
+            ),
             Verdict::Human
         );
     }
@@ -577,13 +658,16 @@ mod tests {
         // Even claiming Satisfied: the provenance is checked before the
         // judgement, so writing "this is fine" in policy is not a way through.
         assert_eq!(
-            verdict_of(&CapabilityResolution::Adopted {
-                evidence: evidence_with(Provenance::Declared {
-                    by: "policy#skip:x".into(),
-                    reason: "trust me".into(),
-                }),
-                judgement: Judgement::Satisfied,
-            }),
+            verdict_of(
+                &CapabilityResolution::Adopted {
+                    evidence: evidence_with(Provenance::Declared {
+                        by: "policy#skip:x".into(),
+                        reason: "trust me".into(),
+                    }),
+                    judgement: Judgement::Satisfied,
+                },
+                Enforcement::Enforcing
+            ),
             Verdict::Human
         );
     }
@@ -595,7 +679,7 @@ mod tests {
                 detail: "no unsafe in changed hunks".into(),
             },
         };
-        assert_eq!(verdict_of(&derived), Verdict::Auto);
+        assert_eq!(verdict_of(&derived, Enforcement::Enforcing), Verdict::Auto);
 
         let declared = CapabilityResolution::Skipped {
             reason: SkipReason::Declared {
@@ -611,7 +695,108 @@ mod tests {
             },
         };
         // A human waiver is reviewable, not free.
-        assert_eq!(verdict_of(&declared), Verdict::InterfaceReview);
+        assert_eq!(
+            verdict_of(&declared, Enforcement::Enforcing),
+            Verdict::InterfaceReview
+        );
+    }
+
+    #[test]
+    fn an_advisory_failure_does_not_move_the_enforced_tier() {
+        let violated = CapabilityResolution::Ran {
+            evidence: measured(),
+            judgement: Judgement::Violated {
+                detail: "2 tests failed".into(),
+            },
+        };
+        let (enforced, _) = tiers_of(&violated, Enforcement::Advisory);
+        assert_eq!(enforced, Tier::BOTTOM);
+        assert_eq!(enforced.verdict(), Verdict::Auto);
+    }
+
+    #[test]
+    fn an_advisory_failure_does_move_the_advisory_tier() {
+        // The other half: advisory is not "ignored", it is "recorded elsewhere".
+        // If it were dropped, `core.tier == t0` would be indistinguishable from
+        // "nothing that failed counted", which is the measurement the
+        // escape-rate loop exists to make.
+        let violated = CapabilityResolution::Ran {
+            evidence: measured(),
+            judgement: Judgement::Violated {
+                detail: "2 tests failed".into(),
+            },
+        };
+        let (_, advisory) = tiers_of(&violated, Enforcement::Advisory);
+        assert_eq!(advisory, Tier::TOP);
+    }
+
+    #[test]
+    fn a_policy_integrity_fact_is_never_advisory() {
+        // The two-token gate disable, refused. A requirement naming a capability
+        // this build cannot evaluate escalates the *enforced* ledger whatever
+        // its `enforcement` says, because the failure is in the policy and not
+        // in the code the policy was asked about.
+        //
+        // Table-driven over both policy-integrity variants and both enforcement
+        // values, so the advisory case cannot be the one that was forgotten.
+        let integrity = [
+            UnverifiedReason::UnknownCapability {
+                id: "tetss-pass".into(),
+            },
+            UnverifiedReason::UnknownParser {
+                id: "junti@1".into(),
+            },
+        ];
+
+        for reason in integrity {
+            assert!(reason.is_policy_integrity(), "{reason:?}");
+            for enforcement in [Enforcement::Enforcing, Enforcement::Advisory] {
+                let resolution = CapabilityResolution::Unverified {
+                    reason: reason.clone(),
+                };
+                let (enforced, advisory) = tiers_of(&resolution, enforcement);
+                assert_eq!(
+                    enforced,
+                    Tier::TOP,
+                    "{reason:?} under {enforcement:?} must escalate the enforced tier"
+                );
+                assert_eq!(
+                    enforced.verdict(),
+                    Verdict::Human,
+                    "{reason:?} under {enforcement:?} must demand a human"
+                );
+                assert_eq!(
+                    advisory,
+                    Tier::BOTTOM,
+                    "{reason:?} must not reach the advisory ledger at all"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn every_other_unverified_reason_is_a_result_not_a_policy_fact() {
+        // The classification's other side. A parse failure is a fact about the
+        // code's evidence and may legitimately be advisory; misfiling one as
+        // policy integrity would quietly make advisory mean nothing.
+        for reason in [
+            UnverifiedReason::MissingEvidence,
+            UnverifiedReason::NoForge,
+            UnverifiedReason::Inconclusive {
+                reason: "no data".into(),
+            },
+            UnverifiedReason::GatesModified {
+                paths: vec![".github/workflows/ci.yml".into()],
+            },
+        ] {
+            assert!(!reason.is_policy_integrity(), "{reason:?}");
+            let (enforced, advisory) = tiers_of(
+                &CapabilityResolution::Unverified { reason },
+                Enforcement::Advisory,
+            );
+            assert_eq!(enforced, Tier::BOTTOM);
+            assert_eq!(advisory, Tier::TOP);
+        }
     }
 
     #[test]
