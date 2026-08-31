@@ -371,10 +371,16 @@ pub enum ResolutionState {
 impl ResolutionState {
     /// Order by how much is actually known, least first.
     ///
-    /// Used to aggregate a requirement that spans several crates:
-    /// least-confident-wins. Note that `Adopt` sorting below `Run` affects only
-    /// how the state is *labelled* — escalation is driven by the state itself,
-    /// so this debatable ordering never changes a verdict.
+    /// This is the order [`collapse`](Self::collapse) minimises over, and the
+    /// only thing that order is for. Note that `Adopt` ranking below `Run`
+    /// affects only how a capability is *labelled* — escalation is driven by
+    /// the resolution itself, not by this rank, so the debatable half of the
+    /// ordering never changes a verdict.
+    ///
+    /// Deliberately not the derived [`Ord`], which follows declaration order
+    /// (`Adopt` < `Run` < `Skip` < `Unverified`) and is a different sequence.
+    /// Sorting states with `min` where `collapse` was meant would pick `Adopt`
+    /// over `Unverified`, which is the fail-open this rank exists to prevent.
     #[must_use]
     pub fn confidence_rank(self) -> u8 {
         match self {
@@ -383,6 +389,52 @@ impl ResolutionState {
             Self::Adopt => 2,
             Self::Run => 3,
         }
+    }
+
+    /// Combine two states for the same capability: least confident wins.
+    ///
+    /// A requirement is a *(capability × scope)* pair, so one capability can
+    /// resolve more than once — `tests-pass` adopted for `kono-core` and
+    /// unverified for `kono-net` is two resolutions.
+    /// [`BundleCore::capability_states`](crate::bundle::BundleCore::capability_states)
+    /// is keyed by a bare [`CapabilityId`](crate::ids::CapabilityId), so those
+    /// resolutions have to become one entry, and this is the rule that makes
+    /// them one: the [`confidence_rank`](Self::confidence_rank) minimum. The
+    /// pair above collapses to `Unverified`, never to `Adopt`, because an entry
+    /// reading `adopt` while some scope went unanswered is a fail-open written
+    /// into the one part of the bundle that can never be corrected later.
+    ///
+    /// Binary rather than iterator-shaped, so the laws it must obey are
+    /// directly expressible: `collapse` is a meet — commutative, associative,
+    /// idempotent, with `Unverified` absorbing and `Run` the identity — exactly
+    /// as [`Tier::join`](crate::tier::Tier::join) is a join.
+    /// `tests/collapse_is_a_semilattice.rs` proves all five. Commutativity is
+    /// the load-bearing one: scopes resolve concurrently, so a rule that
+    /// depended on which finished first would write scheduling noise into a
+    /// frozen bundle field.
+    ///
+    /// Collapsing is lossy, and the loss is counted rather than hidden — see
+    /// [`Confidence::partial`](crate::bundle::Confidence::partial).
+    #[must_use]
+    pub fn collapse(self, other: Self) -> Self {
+        if other.confidence_rank() < self.confidence_rank() {
+            other
+        } else {
+            self
+        }
+    }
+
+    /// [`collapse`](Self::collapse) across every state a capability resolved
+    /// to, or `None` when it resolved to none.
+    ///
+    /// `None` rather than a defaulted state: no variant means "nothing asked
+    /// for this", and the nearest candidates lie in opposite directions —
+    /// `Skip` claims someone decided it was inapplicable, `Unverified` claims
+    /// someone expected it. A capability with no requirements has no entry in
+    /// `capability_states`, which is what `None` says.
+    #[must_use]
+    pub fn collapse_all(states: impl IntoIterator<Item = Self>) -> Option<Self> {
+        states.into_iter().reduce(Self::collapse)
     }
 }
 
@@ -1007,5 +1059,41 @@ mod tests {
         ];
         states.sort_by_key(|s| s.confidence_rank());
         assert_eq!(states[0], ResolutionState::Unverified);
+    }
+
+    #[test]
+    fn collapsing_a_capability_keeps_the_least_confident_scope() {
+        // The case the frozen `capability_states` key forces: one capability,
+        // two scopes, one map entry. The entry must be the unverified one.
+        assert_eq!(
+            ResolutionState::Adopt.collapse(ResolutionState::Unverified),
+            ResolutionState::Unverified
+        );
+        assert_eq!(
+            ResolutionState::collapse_all([
+                ResolutionState::Run,
+                ResolutionState::Skip,
+                ResolutionState::Adopt,
+            ]),
+            Some(ResolutionState::Skip)
+        );
+    }
+
+    #[test]
+    fn collapse_does_not_follow_the_derived_ordering() {
+        // `Ord` is declaration order, in which `Adopt` is the minimum. Anything
+        // that reached for `min` instead of `collapse` would report `adopt` for
+        // a capability whose other scope was never answered.
+        let scopes = [ResolutionState::Adopt, ResolutionState::Unverified];
+        assert_eq!(scopes.iter().copied().min(), Some(ResolutionState::Adopt));
+        assert_eq!(
+            ResolutionState::collapse_all(scopes),
+            Some(ResolutionState::Unverified)
+        );
+    }
+
+    #[test]
+    fn a_capability_nothing_required_collapses_to_nothing() {
+        assert_eq!(ResolutionState::collapse_all([]), None);
     }
 }
