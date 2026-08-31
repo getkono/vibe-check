@@ -47,27 +47,28 @@ vibe-check-testkit = { path = "crates/vibe-check-testkit" }
 # the user's `diff.renames` — deterministic by construction, which is why we
 # prefer it to shelling out to `git diff`.
 #
-# `karet-vcs` and `karet-search` are published only at 0.2.2 while the rest of
-# the karet workspace is at 0.3.0. 0.2.2 has everything we need except
-# `file_at_rev`; we carry a local `blob_at_rev` until 0.3.0 lands.
+# The whole karet workspace publishes at one version, so these move together.
 #
-# `default-features = false` on karet-vcs drops the `signature` feature (ssh-key).
+# `default-features = false` is load-bearing, not tidiness: `karet-vcs` defaults
+# to `["signature"]`, which enables `dep:ssh-key`. We never verify a commit
+# signature, and a dependency that parses key material has no business in a
+# process that runs untrusted pull-request code. `cargo tree -p vibe-check-diff`
+# must show neither `ssh-key` nor `ratatui`.
 # NEVER enable the `view` feature on any karet crate — it pulls ratatui.
-karet-vcs      = { version = "0.2.2", default-features = false }
-karet-diff     = "0.3.0"
-karet-filetype = "0.3.0"
+karet-vcs      = { version = "0.6.0", default-features = false }
+karet-diff     = "0.6.0"
+karet-filetype = "0.6.0"
 # NOT declared: karet-core.
 #
-# Two reasons, both worth recording. First, `karet-vcs` 0.2.2 depends on
-# `karet-core` 0.2.2; declaring 0.3.0 here would link *both* — they are
-# semver-incompatible, so a `Span` from one would not be a `Span` from the other,
-# and the resulting type errors point at a version skew rather than at anything
-# meaningful. Second, we do not need it: `vibe-check-model` defines its own
-# `Location`, which carries a blob hash and an enclosing item path so that a
-# location stays resolvable after a force-push. karet's coordinates are for a
-# live editor buffer and carry neither.
-#
-# Revisit if the karet workspace publishes a synchronized 0.3.0 for `karet-vcs`.
+# This previously carried a second reason — that `karet-vcs` 0.2.2 pinned
+# `karet-core` 0.2.2, so naming a newer one would link both semver-incompatible
+# copies and make a `Span` from one not a `Span` from the other. A synchronized
+# 0.6.0 retires that argument, but the other one stands on its own: we do not
+# need the crate. `vibe-check-model` defines its own `Location`, carrying a blob
+# hash and an enclosing item path so a location stays resolvable after a
+# force-push; karet's coordinates describe a live editor buffer and carry
+# neither. Declaring it would buy an unused dependency and a second vocabulary
+# for the same idea.
 
 # --- foundational -----------------------------------------------------------
 serde      = { version = "1.0.229", features = ["derive"] }
