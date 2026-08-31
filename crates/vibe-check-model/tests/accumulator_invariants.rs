@@ -155,6 +155,25 @@ fn the_adjudicator_exposes_no_escape_hatches() {
 }
 
 #[test]
+fn the_adjudicator_has_no_default() {
+    // `Default` is the escape hatch that does not look like one. It reintroduces
+    // exactly what `new` being the sole constructor is meant to prevent: an
+    // adjudicator conjured in the middle of a function that should have threaded
+    // the real one through, accumulating escalations nobody will ever read.
+    //
+    // Removing the impl trips `clippy::new_without_default`, which is allowed
+    // with its reasoning next to the type. This test is what stops someone
+    // silencing that lint the other way.
+    let source = code_only(non_test_source(ACCUMULATOR));
+    assert!(
+        !source.contains("impl Default for Adjudicator"),
+        "`Adjudicator` must not implement `Default`; the type's own documentation \
+         explains why, and an impl that contradicts its documentation is worse \
+         than either one alone"
+    );
+}
+
+#[test]
 fn the_signature_scanner_actually_works() {
     // This file's guarantees are only as good as the parsing above, and a
     // scanner that silently matches nothing would pass every test here.

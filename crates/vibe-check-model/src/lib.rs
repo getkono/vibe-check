@@ -44,7 +44,7 @@ pub use adjudicate::{Adjudication, Adjudicator, Escalation};
 pub use bundle::{BundleCore, Confidence, EvidenceBundle, Generator};
 pub use evidence::{
     CaseOutcome, CaseStatus, Evidence, EvidenceFacts, LocatedFinding, Metric, ParsedEvidence,
-    Provenance, Severity,
+    Provenance, RawRef, Severity,
 };
 pub use ids::{
     AdoptionSourceId, AnalyzerId, CapabilityId, CrateId, FactKey, LaneId, MetricKey, ParserId,

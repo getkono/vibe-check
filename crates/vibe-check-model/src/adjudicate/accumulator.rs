@@ -74,6 +74,14 @@ pub struct Adjudicator {
 
 impl Adjudicator {
     /// A fresh adjudicator at [`Tier::BOTTOM`].
+    // `new_without_default` is allowed rather than satisfied, and scoped to this
+    // constructor rather than the whole impl so a second one cannot inherit the
+    // exemption. The lint's advice is right in general and wrong here: an
+    // adjudicator is always created for a specific evaluation, and
+    // `Default::default()` is exactly the call that shows up in the middle of a
+    // function that should have threaded the real one through. See the note on
+    // the type.
+    #[allow(clippy::new_without_default)]
     #[must_use]
     pub fn new() -> Self {
         Self {
@@ -138,12 +146,6 @@ impl Adjudicator {
             tier: self.tier,
             escalations: self.ledger,
         }
-    }
-}
-
-impl Default for Adjudicator {
-    fn default() -> Self {
-        Self::new()
     }
 }
 
