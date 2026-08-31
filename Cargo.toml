@@ -38,6 +38,7 @@ categories   = ["development-tools", "command-line-utilities"]
 # published these gain `version =` pins; see the publish decision in the plan.
 vibe-check-model   = { path = "crates/vibe-check-model" }
 vibe-check-host    = { path = "crates/vibe-check-host" }
+vibe-check-diff    = { path = "crates/vibe-check-diff" }
 vibe-check-testkit = { path = "crates/vibe-check-testkit" }
 
 # --- reused from getkono/karet ----------------------------------------------
@@ -56,10 +57,8 @@ vibe-check-testkit = { path = "crates/vibe-check-testkit" }
 # on any karet crate either — it pulls ratatui, a terminal UI, into a headless
 # process. Both bans are asserted, not just stated here:
 # `crates/vibe-check-model/tests/no_key_parser_or_tui_in_the_tree.rs`.
-karet-vcs      = { version = "0.6.0", default-features = false }
-karet-diff     = "0.6.0"
-karet-filetype = "0.6.0"
-# NOT declared: karet-core.
+karet-vcs = { version = "0.6.0", default-features = false }
+# NOT declared: karet-core, karet-diff, karet-filetype.
 #
 # This previously carried a second reason — that `karet-vcs` 0.2.2 pinned
 # `karet-core` 0.2.2, so naming a newer one would link both semver-incompatible
@@ -70,6 +69,9 @@ karet-filetype = "0.6.0"
 # force-push; karet's coordinates describe a live editor buffer and carry
 # neither. Declaring it would buy an unused dependency and a second vocabulary
 # for the same idea.
+#
+# `karet-diff` and `karet-filetype` are pins with no consumer. They return
+# with the ChangeSet work, in the same commit as their first use.
 
 # --- foundational -----------------------------------------------------------
 serde      = { version = "1.0.229", features = ["derive"] }
@@ -87,9 +89,6 @@ jiff = { version = "0.2.35", features = ["serde"] }
 # UTF-8-only paths. Non-UTF-8 paths are rejected explicitly rather than being
 # lossily converted, because a lossy path silently changes crate attribution.
 camino = { version = "1.2.5", features = ["serde1"] }
-# Deterministic ordered map with O(1) lookup, for the few places insertion order
-# is the meaningful order. Anything reaching the engine or a bundle uses BTreeMap.
-indexmap = { version = "2.14.0", features = ["serde"] }
 
 # --- async / execution ------------------------------------------------------
 tokio       = { version = "1.53.1", default-features = false }

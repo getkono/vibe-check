@@ -20,7 +20,7 @@
 
 use async_trait::async_trait;
 
-use vibe_check_model::{LaneId, RequirementId};
+use vibe_check_model::{LaneId, LeafId, RequirementId};
 
 use crate::exec::ProcessPlan;
 
@@ -29,9 +29,12 @@ use crate::exec::ProcessPlan;
 pub struct Leaf {
     /// Stable identifier, unique within a run.
     ///
-    /// Also the artifact-name suffix, which must be unique per run — uploading
-    /// two artifacts under one name is an error, not a merge.
-    pub id: String,
+    /// [`LeafId`] rather than a `String` because this value is also the
+    /// artifact-name suffix and is interpolated through a job matrix, a shell,
+    /// and a `--id` flag before it comes back as evidence. Its constraints, and
+    /// why uniqueness is the planner's job rather than the constructor's, are
+    /// documented on the type.
+    pub id: LeafId,
     /// The requirement this answers.
     pub requirement: RequirementId,
     /// What to run.
@@ -47,7 +50,7 @@ pub enum Dispatch {
     /// The leaves ran here, and their evidence is available now.
     Completed {
         /// Identifiers of leaves that ran.
-        leaf_ids: Vec<String>,
+        leaf_ids: Vec<LeafId>,
     },
     /// The leaves were handed to an external scheduler.
     ///

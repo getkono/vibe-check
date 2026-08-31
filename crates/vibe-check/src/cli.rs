@@ -10,6 +10,7 @@
 //! versioned, reviewable, and read from the merge base.
 
 use clap::{Parser, Subcommand, ValueEnum};
+use vibe_check_model::LeafId;
 
 /// How to render output.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
@@ -87,8 +88,19 @@ pub enum Command {
     /// Invoked per job when work has been fanned out across a matrix.
     Run {
         /// Which leaf of the plan to run.
-        #[arg(long)]
-        id: String,
+        ///
+        /// Lowercase letters, digits, `.`, `_`, and `-`, starting with a letter
+        /// or a digit, and at most 64 characters long. Checked here rather than
+        /// downstream, so a malformed identifier is reported with the offending
+        /// character rather than surfacing three steps later as an artifact
+        /// nobody uploaded.
+        //
+        // This doc comment is `--help` text, so the reason for the closure goes
+        // here instead: `LeafId::new_checked` is generic over `impl AsRef<str>`,
+        // so as a function item it binds one lifetime, and clap needs a parser
+        // that works for any.
+        #[arg(long, value_parser = |raw: &str| LeafId::new_checked(raw))]
+        id: LeafId,
     },
 
     /// Combine evidence into a verdict and write the bundle.
@@ -191,7 +203,20 @@ mod tests {
         assert!(Cli::try_parse_from(["vibe-check", "run"]).is_err());
         let cli =
             Cli::try_parse_from(["vibe-check", "run", "--id", "miri-core-0"]).expect("parses");
-        assert!(matches!(cli.command, Command::Run { id } if id == "miri-core-0"));
+        assert!(matches!(cli.command, Command::Run { id } if id.as_str() == "miri-core-0"));
+    }
+
+    #[test]
+    fn a_malformed_leaf_identifier_is_rejected_at_the_boundary() {
+        // The id is interpolated into an artifact name and a shell command, so
+        // the last useful place to reject one is before the process does any
+        // work with it.
+        for bad in ["../../etc/passwd", "Miri-Core", "a b", "$(id)"] {
+            assert!(
+                Cli::try_parse_from(["vibe-check", "run", "--id", bad]).is_err(),
+                "{bad:?} must not parse as a leaf id"
+            );
+        }
     }
 
     #[test]

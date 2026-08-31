@@ -28,6 +28,7 @@ path = "src/bin/cargo-vibe-check.rs"
 [dependencies]
 vibe-check-model = { workspace = true }
 vibe-check-host  = { workspace = true }
+vibe-check-diff  = { workspace = true }
 async-trait        = { workspace = true }
 blake3             = { workspace = true }
 clap               = { workspace = true }
