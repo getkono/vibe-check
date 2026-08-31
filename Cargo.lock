@@ -2282,7 +2282,6 @@ dependencies = [
  "async-trait",
  "camino",
  "jiff",
- "serde",
  "thiserror",
  "vibe-check-model",
 ]

@@ -20,7 +20,7 @@
 
 use async_trait::async_trait;
 
-use vibe_check_model::RequirementId;
+use vibe_check_model::{LaneId, RequirementId};
 
 use crate::exec::ProcessPlan;
 
@@ -37,7 +37,7 @@ pub struct Leaf {
     /// What to run.
     pub plan: ProcessPlan,
     /// Which lane, for grouping and budgets.
-    pub lane: String,
+    pub lane: LaneId,
 }
 
 /// Where a scheduler put the work.

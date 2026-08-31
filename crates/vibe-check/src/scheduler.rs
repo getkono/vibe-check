@@ -98,7 +98,7 @@ fn spawn_leaf(set: &mut JoinSet<String>, exec: Arc<dyn Exec>, leaf: Leaf) {
 mod tests {
     use super::*;
     use vibe_check_host::exec::ProcessPlan;
-    use vibe_check_model::RequirementId;
+    use vibe_check_model::{LaneId, RequirementId};
     use vibe_check_testkit::FakeExec;
 
     fn leaf(id: &str, program: &str) -> Leaf {
@@ -106,7 +106,7 @@ mod tests {
             id: id.to_owned(),
             requirement: RequirementId::new(format!("req_{id}")),
             plan: ProcessPlan::new(program, []),
-            lane: "cheap".to_owned(),
+            lane: LaneId::new("cheap"),
         }
     }
 

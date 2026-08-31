@@ -18,7 +18,6 @@ vibe-check-model = { workspace = true }
 async-trait      = { workspace = true }
 camino           = { workspace = true }
 jiff             = { workspace = true }
-serde            = { workspace = true }
 thiserror        = { workspace = true }
 
 [lints]
