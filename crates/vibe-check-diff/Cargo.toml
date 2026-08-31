@@ -1,0 +1,30 @@
+[package]
+name        = "vibe-check-diff"
+description = "Reads a pull-request diff into the shared representation the classifier works over."
+version.workspace      = true
+edition.workspace      = true
+rust-version.workspace = true
+license.workspace      = true
+repository.workspace   = true
+authors.workspace      = true
+publish     = false
+
+[dependencies]
+vibe-check-model = { workspace = true }
+vibe-check-host  = { workspace = true }
+camino           = { workspace = true }
+jiff             = { workspace = true }
+thiserror        = { workspace = true }
+
+# Reused from getkono/karet rather than reimplemented. `range_changes` is the
+# pull-request diff primitive, and it forces rename detection on regardless of
+# the user's `diff.renames` setting — which matters because rename detection
+# decides which crate a file belongs to, and therefore which policy applies.
+karet-vcs      = { workspace = true }
+karet-filetype = { workspace = true }
+
+[dev-dependencies]
+vibe-check-testkit = { workspace = true }
+
+[lints]
+workspace = true

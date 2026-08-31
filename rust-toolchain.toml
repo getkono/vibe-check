@@ -1,3 +1,10 @@
+# Pinned, not floating. The toolchain is an input to every verdict vibe-check
+# produces: a compiler change can change whether code builds, what clippy finds,
+# and what Miri reports. Recording an exact version is what lets a bundle be
+# replayed and lets a mismatch be *explained* rather than mysterious.
+#
+# This file is also a gate path: a pull request that edits it is adjudicated
+# against the merge-base policy, with the verdict forced to human review.
 [toolchain]
-channel = "stable"
+channel = "1.97.1"
 components = ["rustfmt", "clippy", "rust-analyzer"]

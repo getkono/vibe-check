@@ -1,0 +1,24 @@
+# Determinism, enforced by the linter rather than by discipline.
+#
+# The guarantee we are protecting: same diff + same policy => same verdict.
+# Each entry below closes one way that guarantee silently breaks. The real
+# guarantee is the replay-corpus test, which asserts historical bundles still
+# produce identical verdict digests; these lints just stop you writing the bug
+# in the first place.
+#
+# Escaping a rule is `#[allow(clippy::disallowed_types)]` with a comment. That
+# is deliberately visible in review — and `allow-added` is one of the risk flags
+# vibe-check itself classifies, so we are held to our own standard.
+
+disallowed-types = [
+  { path = "std::collections::HashMap", reason = "iteration order is unspecified and leaks into bundles and digests; use BTreeMap, or IndexMap when insertion order is the meaningful order" },
+  { path = "std::collections::HashSet", reason = "iteration order is unspecified and leaks into bundles and digests; use BTreeSet" },
+  { path = "std::path::Path", reason = "non-UTF-8 paths must be rejected explicitly, never lossily converted, because a lossy path silently changes crate attribution; use camino::Utf8Path (FFI boundaries may allow this lint)" },
+  { path = "std::path::PathBuf", reason = "use camino::Utf8PathBuf; see std::path::Path" },
+]
+
+disallowed-methods = [
+  { path = "std::time::SystemTime::now", reason = "time-dependent decisions (skip `expires`, artifact freshness) must read the head commit's committer date so verdicts replay identically; only the `clock` module may read the wall clock" },
+  { path = "std::time::Instant::now", reason = "durations are display-only and excluded from digests; measure inside the `clock` module" },
+  { path = "std::fs::read_dir", reason = "directory order is filesystem-dependent; use the `fs` wrapper, which collects and sorts" },
+]
