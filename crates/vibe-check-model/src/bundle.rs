@@ -27,6 +27,7 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
+use crate::adjudicate::{AdvisoryAdjudication, EnforcedAdjudication};
 use crate::ids::{CapabilityId, RiskFlagId};
 use crate::resolution::ResolutionState;
 use crate::schema::SchemaVersion;
@@ -60,6 +61,20 @@ pub struct BundleCore {
     pub tier: Tier,
     /// The verdict, derived from the tier.
     pub verdict: Verdict,
+    /// The tier the advisory ledger reached. Never contributes to `tier`.
+    ///
+    /// `tier` is what was enforced; this is what *would* have been enforced had
+    /// every requirement been enforcing. Their disagreement is the measurement
+    /// the escape-rate loop needs, and the only thing distinguishing "nothing
+    /// failed" from "nothing that failed counted".
+    ///
+    /// Deliberately does **not** escalate when it exceeds `tier`. That would
+    /// reintroduce exactly the blocking behaviour advisory exists to remove;
+    /// the requirement is to report loudly, not to report and block.
+    ///
+    /// On the digest inclusion list — see #27 and #45, which write the first
+    /// bundle and the digest that covers it.
+    pub advisory_tier: Tier,
     /// Every risk flag the classifier emitted, sorted.
     pub flag_ids: Vec<RiskFlagId>,
     /// How each required capability was resolved.
@@ -69,6 +84,58 @@ pub struct BundleCore {
     /// Excludes timestamps and durations, so the same inputs produce the same
     /// digest. This is what the replay test compares.
     pub verdict_digest: String,
+}
+
+impl BundleCore {
+    /// The **only** place a `BundleCore` is constructed.
+    ///
+    /// The two ledgers arrive as distinct types, so `tier` and `verdict` can
+    /// only come from the enforced adjudication and `advisory_tier` can only
+    /// come from the advisory one; transposing them is not expressible. A
+    /// workspace-wide guard test (`tests/bundle_core_construction.rs`) asserts
+    /// this is the sole construction site, which is what makes that claim hold
+    /// for the whole workspace rather than only for this function.
+    ///
+    /// The fields stay `pub` because every reader needs them and the frozen
+    /// contract is about wire names, not about access.
+    // `too_many_arguments` is allowed rather than satisfied, and scoped to this
+    // constructor so nothing else inherits the exemption. The lint's advice —
+    // group these into a struct — would mean a second type that mirrors `core`
+    // field for field, and a second type that must be kept in step with a frozen
+    // one is a worse hazard than a long signature. Identity fields are what they
+    // are; the point of the function is the last two parameters.
+    #[allow(clippy::too_many_arguments)]
+    #[must_use]
+    pub fn new(
+        bundle_id: String,
+        repo: String,
+        pr: Option<u64>,
+        head_sha: String,
+        base_ref: String,
+        merge_base_sha: String,
+        flag_ids: Vec<RiskFlagId>,
+        capability_states: BTreeMap<CapabilityId, ResolutionState>,
+        verdict_digest: String,
+        enforced: &EnforcedAdjudication,
+        advisory: &AdvisoryAdjudication,
+    ) -> Self {
+        // Written out rather than as `Self { .. }` so the guard test can find
+        // this literal by name and prove there is exactly one of them.
+        BundleCore {
+            bundle_id,
+            repo,
+            pr,
+            head_sha,
+            base_ref,
+            merge_base_sha,
+            tier: enforced.tier(),
+            verdict: enforced.verdict(),
+            advisory_tier: advisory.tier(),
+            flag_ids,
+            capability_states,
+            verdict_digest,
+        }
+    }
 }
 
 /// What produced a bundle.
@@ -197,43 +264,43 @@ impl EvidenceBundle {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::adjudicate::Adjudicator;
+    use crate::adjudicate::{Adjudicators, Enforcement};
     use crate::reason::{EvidenceRef, ReasonCode};
 
+    /// A bundle in the state the whole feature exists to make representable:
+    /// nothing enforced failed, and something advisory did.
     fn bundle() -> EvidenceBundle {
-        let mut adj = Adjudicator::new();
-        adj.escalate(
+        let mut adjudicators = Adjudicators::new();
+        adjudicators.route(Enforcement::Advisory).escalate(
             Tier::T2,
-            ReasonCode::RuleTierAtLeast,
-            "rule `core-unsafe` requires T2",
+            ReasonCode::CapabilityViolated,
+            "`mutants-in-diff-killed` failed: 3 mutants survived",
             EvidenceRef::Unattributed,
         );
-        let adjudication = adj.finish();
+        let (enforced, advisory) = adjudicators.finish();
+
         EvidenceBundle {
             schema_version: SchemaVersion::BUNDLE,
-            core: BundleCore {
-                bundle_id: "vc_test".into(),
-                repo: "getkono/kono".into(),
-                pr: Some(412),
-                head_sha: "9f3c".into(),
-                base_ref: "master".into(),
-                merge_base_sha: "1a77".into(),
-                tier: adjudication.tier,
-                verdict: adjudication.verdict,
-                flag_ids: vec![RiskFlagId::new("unsafe")],
-                capability_states: BTreeMap::from([(
-                    CapabilityId::new("tests-pass"),
-                    ResolutionState::Adopt,
-                )]),
-                verdict_digest: "blake3:7c1e".into(),
-            },
+            core: BundleCore::new(
+                "vc_test".into(),
+                "getkono/kono".into(),
+                Some(412),
+                "9f3c".into(),
+                "master".into(),
+                "1a77".into(),
+                vec![RiskFlagId::new("unsafe")],
+                BTreeMap::from([(CapabilityId::new("tests-pass"), ResolutionState::Adopt)]),
+                "blake3:7c1e".into(),
+                &enforced,
+                &advisory,
+            ),
             generator: Generator {
                 name: "vibe-check".into(),
                 version: "0.1.0".into(),
                 git_sha: None,
                 registry_digest: "blake3:0f22".into(),
             },
-            adjudication,
+            adjudication: enforced.into_adjudication(),
             confidence: Confidence::tally([
                 ResolutionState::Adopt,
                 ResolutionState::Run,
@@ -268,6 +335,7 @@ mod tests {
             "merge_base_sha",
             "tier",
             "verdict",
+            "advisory_tier",
             "flag_ids",
             "capability_states",
             "verdict_digest",
@@ -277,6 +345,32 @@ mod tests {
                 "core.{field} must never be renamed"
             );
         }
+    }
+
+    #[test]
+    fn the_advisory_tier_is_written_in_the_documented_wire_form() {
+        // The escape-rate loop parses this JSON, not this crate's types, so the
+        // form is the contract. There is no digest in this workspace yet — see
+        // #45, which writes the first bundle and must add `advisory_tier` to the
+        // digest inclusion list — so the wire form is what can be proved here.
+        let json = serde_json::to_value(bundle()).expect("serialize");
+        let core = json.get("core").expect("core present");
+
+        assert_eq!(core.get("tier"), Some(&serde_json::json!("t0")));
+        assert_eq!(core.get("advisory_tier"), Some(&serde_json::json!("t2")));
+        assert_eq!(core.get("verdict"), Some(&serde_json::json!("auto")));
+    }
+
+    #[test]
+    fn a_bundle_can_say_nothing_that_failed_counted() {
+        // Without `advisory_tier`, `core.tier == t0` would mean either
+        // "everything passed" or "everything that failed was advisory", and no
+        // reader could tell which. That ambiguity would be permanent: `core` is
+        // the one part of the bundle that cannot be changed later.
+        let core = bundle().core;
+        assert_eq!(core.tier, Tier::T0);
+        assert_eq!(core.verdict, Verdict::Auto);
+        assert_eq!(core.advisory_tier, Tier::T2);
     }
 
     #[test]
