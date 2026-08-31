@@ -169,9 +169,206 @@ id_newtype! {
     FactKey
 }
 
+/// The greatest length a leaf identifier may have, in bytes.
+///
+/// Bytes and characters coincide for every identifier that can be accepted,
+/// because the accepted alphabet is ASCII.
+const LEAF_ID_MAX_LEN: usize = 64;
+
+/// Whether `character` may appear after the first one.
+fn is_leaf_id_char(character: char) -> bool {
+    character.is_ascii_lowercase()
+        || character.is_ascii_digit()
+        || matches!(character, '.' | '_' | '-')
+}
+
+/// Why a leaf identifier was rejected.
+///
+/// Each variant names the rule that failed rather than restating the pattern.
+/// The value handed to [`LeafId::new_checked`] may have come from a plan
+/// document, a job matrix, or a `--id` flag someone typed, and "which character,
+/// at which offset" is the difference between a message that gets fixed and one
+/// that gets shrugged at.
+#[derive(Clone, PartialEq, Eq, Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum LeafIdError {
+    /// The identifier was empty.
+    #[error("a leaf id must not be empty")]
+    Empty,
+
+    /// Longer than 64 bytes.
+    #[error("a leaf id must be at most {LEAF_ID_MAX_LEN} bytes, got {len}")]
+    TooLong {
+        /// How long it actually was, in bytes.
+        len: usize,
+    },
+
+    /// Did not begin with a lowercase ASCII letter or a digit.
+    #[error("a leaf id must start with a lowercase letter or a digit, found {found:?}")]
+    BadLeadingCharacter {
+        /// The offending first character.
+        found: char,
+    },
+
+    /// Contained something outside `[a-z0-9._-]`.
+    #[error(
+        "a leaf id may contain only lowercase letters, digits, `.`, `_`, and `-`; \
+         found {found:?} at byte {at}"
+    )]
+    DisallowedCharacter {
+        /// Byte offset of the offending character.
+        at: usize,
+        /// The offending character.
+        found: char,
+    },
+}
+
+/// Identifies one leaf of a plan: a single capability against a single scope,
+/// dispatched as one unit of work.
+///
+/// Every identifier matches `^[a-z0-9][a-z0-9._-]{0,63}$`, and
+/// [`new_checked`](LeafId::new_checked) is the only way to obtain one.
+///
+/// # Why this one is checked when the rest of this module is not
+///
+/// The identifiers above are interned strings precisely so that an unknown value
+/// stays representable: you cannot fail closed on a risk flag you refused to
+/// parse, and that vocabulary arrives from a policy document somebody else wrote
+/// against a build that may be newer than this one.
+///
+/// A leaf id is the opposite kind of value. It is a token *we* mint, from our own
+/// plan, and there is no future leaf-id shape our own scheduler emits and this
+/// build must tolerate. Nothing is lost by refusing a malformed one, and a great
+/// deal is lost by accepting it, because the id is not only read — it is
+/// *interpolated*. It crosses four process boundaries on the way to becoming
+/// evidence:
+///
+/// ```text
+/// plan JSON → $GITHUB_OUTPUT → ${{ matrix.id }} → --id → artifact name → adjudicate
+/// ```
+///
+/// Each hop is a chance to get the encoding wrong, and two of them are shell and
+/// workflow-expression contexts. The alphabet here is the intersection of what
+/// survives all of them and what GitHub accepts as an artifact-name suffix: no
+/// `/`, `\`, or `:`, which an artifact name rejects outright; no whitespace,
+/// which splits an argument; nothing a shell would expand; and no uppercase,
+/// because an artifact is eventually unpacked onto a filesystem and the macOS
+/// and Windows runners are case-insensitive — so two ids differing only in case
+/// would collide there and not on Linux, which is the worst way for a
+/// uniqueness bug to present.
+///
+/// # Uniqueness
+///
+/// A leaf id must be unique within a run, because it is also the artifact-name
+/// suffix and uploading two artifacts under one name is an error rather than a
+/// merge. That is a property of a *set* of ids and no constructor can enforce
+/// it — this type makes each id well-formed and comparable, so the planner that
+/// mints them can enforce uniqueness with [`Eq`] and [`Ord`] rather than with
+/// string handling.
+///
+/// # Construction
+///
+/// There is deliberately no `new`, no `From<&str>`, and no `From<String>`. This
+/// type is written out by hand instead of through `id_newtype!` for that single
+/// reason: the macro's infallible constructors would make
+/// `LeafId::from("../../etc/passwd")` compile, and the constructor being the
+/// only way in is the entire point.
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
+#[serde(transparent)]
+pub struct LeafId(SmolStr);
+
+impl LeafId {
+    /// Construct from anything string-like, rejecting anything GitHub will not
+    /// accept as an artifact-name suffix.
+    ///
+    /// # Errors
+    /// Returns the [`LeafIdError`] naming the first rule that failed: empty,
+    /// too long, a bad leading character, or a disallowed character and where it
+    /// was found.
+    pub fn new_checked(id: impl AsRef<str>) -> Result<Self, LeafIdError> {
+        let id = id.as_ref();
+        let mut characters = id.char_indices();
+        let Some((_, first)) = characters.next() else {
+            return Err(LeafIdError::Empty);
+        };
+        if id.len() > LEAF_ID_MAX_LEN {
+            return Err(LeafIdError::TooLong { len: id.len() });
+        }
+        if !first.is_ascii_lowercase() && !first.is_ascii_digit() {
+            return Err(LeafIdError::BadLeadingCharacter { found: first });
+        }
+        for (at, found) in characters {
+            if !is_leaf_id_char(found) {
+                return Err(LeafIdError::DisallowedCharacter { at, found });
+            }
+        }
+        Ok(Self(SmolStr::new(id)))
+    }
+
+    /// Borrow the identifier as a string slice.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        self.0.as_str()
+    }
+}
+
+impl fmt::Display for LeafId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.0.as_str())
+    }
+}
+
+// Matches the format `id_newtype!` produces, so a tracing line or an assertion
+// failure reads the same whichever kind of identifier is involved.
+impl fmt::Debug for LeafId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "LeafId({:?})", self.0.as_str())
+    }
+}
+
+impl AsRef<str> for LeafId {
+    fn as_ref(&self) -> &str {
+        self.0.as_str()
+    }
+}
+
+impl TryFrom<&str> for LeafId {
+    type Error = LeafIdError;
+
+    fn try_from(id: &str) -> Result<Self, Self::Error> {
+        Self::new_checked(id)
+    }
+}
+
+impl TryFrom<String> for LeafId {
+    type Error = LeafIdError;
+
+    fn try_from(id: String) -> Result<Self, Self::Error> {
+        Self::new_checked(id)
+    }
+}
+
+// Hand-written rather than derived, so the check runs on the wire.
+//
+// `Serialize` is `#[serde(transparent)]` and emits a bare string, as every other
+// identifier here does. Deserialization reads that string and passes it through
+// `new_checked`, which is what makes the plan-JSON hop actually validated rather
+// than nominally typed: a `LeafId` that exists has been checked, no matter which
+// of the four boundaries it arrived across.
+impl<'de> Deserialize<'de> for LeafId {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let raw = SmolStr::deserialize(deserializer)?;
+        Self::new_checked(raw).map_err(serde::de::Error::custom)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
 
     #[test]
     fn round_trips_through_json() {
@@ -214,5 +411,152 @@ mod tests {
             format!("{:?}", RiskFlagId::new("unsafe")),
             r#"RiskFlagId("unsafe")"#
         );
+    }
+
+    /// The pattern `LeafId` promises, written out so the property tests below
+    /// have something independent to check `new_checked` against.
+    fn matches_leaf_id_pattern(id: &str) -> bool {
+        let mut characters = id.chars();
+        let Some(first) = characters.next() else {
+            return false;
+        };
+        id.len() <= LEAF_ID_MAX_LEN
+            && (first.is_ascii_lowercase() || first.is_ascii_digit())
+            && characters.all(is_leaf_id_char)
+    }
+
+    #[test]
+    fn accepts_the_ids_the_planner_mints() {
+        for id in [
+            "a",
+            "0",
+            "miri-core-0",
+            "tests.workspace",
+            "api_diff",
+            "z9",
+            &"a".repeat(LEAF_ID_MAX_LEN),
+        ] {
+            let leaf = LeafId::new_checked(id).expect("a well-formed leaf id");
+            assert_eq!(leaf.as_str(), id);
+            assert_eq!(leaf.to_string(), id);
+        }
+    }
+
+    #[test]
+    fn rejects_what_would_not_survive_the_four_hops() {
+        // Each of these is a real failure mode rather than a spelling nit:
+        // uppercase collides with a lowercase id in a case-insensitive artifact
+        // name, a leading `-` reads as a flag, `/` and `..` are the path-traversal
+        // shape, whitespace splits an argument, and `$( )` is command
+        // substitution in the shell hop.
+        for bad in [
+            "",
+            "Miri-core-0",
+            "-leading",
+            ".leading",
+            "_leading",
+            "a/b",
+            "../../etc/passwd",
+            "..",
+            "a b",
+            "$(rm -rf /)",
+            "a\\nb",
+            "café",
+            &"a".repeat(LEAF_ID_MAX_LEN + 1),
+        ] {
+            assert!(
+                LeafId::new_checked(bad).is_err(),
+                "{bad:?} must not be a leaf id"
+            );
+            assert!(!matches_leaf_id_pattern(bad));
+        }
+    }
+
+    #[test]
+    fn an_error_names_the_rule_that_failed() {
+        // A caller who typed the id needs to know which character to change.
+        assert_eq!(LeafId::new_checked(""), Err(LeafIdError::Empty));
+        assert_eq!(
+            LeafId::new_checked("-x"),
+            Err(LeafIdError::BadLeadingCharacter { found: '-' })
+        );
+        assert_eq!(
+            LeafId::new_checked("a/b"),
+            Err(LeafIdError::DisallowedCharacter { at: 1, found: '/' })
+        );
+        assert_eq!(
+            LeafId::new_checked("a".repeat(65)),
+            Err(LeafIdError::TooLong { len: 65 })
+        );
+        assert!(
+            LeafId::new_checked("a/b")
+                .expect_err("rejected")
+                .to_string()
+                .contains("at byte 1")
+        );
+    }
+
+    #[test]
+    fn the_wire_form_is_a_bare_string_like_every_other_identifier() {
+        let id = LeafId::new_checked("miri-core-0").expect("valid");
+        assert_eq!(
+            serde_json::to_string(&id).expect("serialize"),
+            r#""miri-core-0""#
+        );
+        assert_eq!(format!("{id:?}"), r#"LeafId("miri-core-0")"#);
+    }
+
+    #[test]
+    fn deserialization_runs_the_same_check_as_the_constructor() {
+        // The point of the hand-written `Deserialize`. Plan JSON is one of the
+        // four hops, and a nominally-typed `LeafId` that never ran the check
+        // would make the type decorative exactly where it matters most.
+        let error = serde_json::from_str::<LeafId>(r#""../../etc/passwd""#)
+            .expect_err("must not deserialize");
+        assert!(
+            error.to_string().contains("must start with"),
+            "the serde error must carry the rule that failed, got {error}"
+        );
+    }
+
+    #[test]
+    fn try_from_is_the_only_other_way_in() {
+        assert_eq!(LeafId::try_from("ok-1").expect("valid").as_str(), "ok-1");
+        assert_eq!(
+            LeafId::try_from("ok-1".to_owned()).expect("valid").as_str(),
+            "ok-1"
+        );
+        assert!(LeafId::try_from("NOT OK").is_err());
+    }
+
+    proptest! {
+        /// `new_checked` accepts exactly the pattern the type documents —
+        /// no more, and no less.
+        #[test]
+        fn new_checked_agrees_with_the_documented_pattern(raw in ".{0,80}") {
+            prop_assert_eq!(
+                LeafId::new_checked(&raw).is_ok(),
+                matches_leaf_id_pattern(&raw)
+            );
+        }
+
+        /// Anything accepted survives the plan-JSON hop unchanged.
+        #[test]
+        fn every_accepted_id_round_trips_through_json(raw in "[a-z0-9][a-z0-9._-]{0,63}") {
+            let id = LeafId::new_checked(&raw).expect("matches the pattern");
+            let json = serde_json::to_string(&id).expect("serialize");
+            let back: LeafId = serde_json::from_str(&json).expect("deserialize");
+            prop_assert_eq!(back, id);
+        }
+
+        /// And anything rejected is rejected on the wire too, rather than
+        /// slipping in because it arrived as JSON instead of through the
+        /// constructor.
+        #[test]
+        fn a_rejected_id_does_not_deserialize(raw in ".{0,80}") {
+            prop_assume!(LeafId::new_checked(&raw).is_err());
+            let json = serde_json::to_string(&raw).expect("serialize a plain string");
+            prop_assert!(serde_json::from_str::<LeafId>(&json).is_err());
+        }
     }
 }

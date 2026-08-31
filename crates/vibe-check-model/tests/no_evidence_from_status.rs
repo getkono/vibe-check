@@ -47,7 +47,21 @@ const FORBIDDEN_TARGETS: [&str; 2] = ["Evidence", "Artifact"];
 /// Listed separately from the targets because the danger is not symmetric: a
 /// conversion *out of* a check run is suspect wherever it lands, since the only
 /// honest thing to do with one is read its name for a diagnostic.
-const FORBIDDEN_SOURCES: [&str; 3] = ["CheckRun", "CheckConclusion", "CheckRequest"];
+///
+/// `WorkflowRun` and `RunStatus` are here for the same reason and are not
+/// covered by the target list above. A workflow run carries a `CheckConclusion`
+/// and a lifecycle status, so a conversion out of one launders the same colour
+/// through a different type — and it need not target `Evidence` or `Artifact` to
+/// do damage. `impl From<WorkflowRun> for Adoption`, or for anything else that
+/// downstream code treats as an answer, is the same mistake wearing the name of
+/// the type that made the filters writable.
+const FORBIDDEN_SOURCES: [&str; 5] = [
+    "CheckRun",
+    "CheckConclusion",
+    "CheckRequest",
+    "WorkflowRun",
+    "RunStatus",
+];
 
 /// One `impl From<Source> for Target` found in the source text.
 #[derive(PartialEq, Eq, Debug)]
@@ -290,14 +304,16 @@ fn nothing_converts_out_of_a_check_run() {
 
     assert!(
         offenders.is_empty(),
-        "a check run may not be converted into anything:\n{}\n\
+        "a check run or workflow run may not be converted into anything:\n{}\n\
          \n\
          A `conclusion: success` means a job someone configured reported success. \
          It does not say which tests ran, whether the binary compiled, or whether \
          a path filter skipped the job entirely — and `Skipped` renders as a green \
-         tick under most branch-protection settings. Reading the name for a \
-         diagnostic is fine; every other use of one is a way to launder a colour \
-         into a measurement.",
+         tick under most branch-protection settings. A `WorkflowRun` is the same \
+         colour with provenance attached: it says which run produced bytes, never \
+         that the run measured what its name suggests. Reading either for a \
+         diagnostic, or filtering on one, is fine; converting one is a way to \
+         launder a colour into a measurement.",
         offenders.join("\n")
     );
 }

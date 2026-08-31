@@ -14,7 +14,7 @@ use std::sync::Mutex;
 use async_trait::async_trait;
 use vibe_check_host::forge::{
     Artifact, ArtifactMeta, CheckRequest, CheckRun, CommentId, CommentMarker, ForgeError,
-    ForgeRead, ForgeResult, ForgeWrite, PullRequest, RunRef,
+    ForgeRead, ForgeResult, ForgeWrite, PullRequest, RunRef, WorkflowRun,
 };
 
 /// Something the code under test tried to change.
@@ -48,7 +48,9 @@ pub enum Mutation {
 pub struct FakeForge {
     pull_request: Option<PullRequest>,
     check_runs: Vec<CheckRun>,
-    runs: Vec<RunRef>,
+    runs: Vec<WorkflowRun>,
+    // Joined on `RunRef` rather than on the whole run: a re-run produces a new
+    // attempt, and an artifact belongs to the attempt that uploaded it.
     artifacts: Vec<(RunRef, ArtifactMeta)>,
     downloads: Vec<(u64, Vec<u8>)>,
     mutations: Mutex<Vec<Mutation>>,
@@ -76,13 +78,17 @@ impl FakeForge {
     }
 
     /// Add an artifact belonging to a run, with the bytes it downloads to.
+    ///
+    /// The run is registered for [`ForgeRead::workflow_runs`] the first time it
+    /// is named, so a test that wants a discoverable run states it once, here,
+    /// rather than keeping two lists in step.
     #[must_use]
-    pub fn with_artifact(mut self, run: RunRef, meta: ArtifactMeta, bytes: Vec<u8>) -> Self {
-        if !self.runs.contains(&run) {
-            self.runs.push(run);
+    pub fn with_artifact(mut self, run: WorkflowRun, meta: ArtifactMeta, bytes: Vec<u8>) -> Self {
+        if !self.runs.iter().any(|known| known.run == run.run) {
+            self.runs.push(run.clone());
         }
         self.downloads.push((meta.id, bytes));
-        self.artifacts.push((run, meta));
+        self.artifacts.push((run.run, meta));
         self
     }
 
@@ -115,15 +121,15 @@ impl ForgeRead for FakeForge {
         Ok(self.check_runs.clone())
     }
 
-    async fn workflow_runs(&self, _head_sha: &str) -> ForgeResult<Vec<RunRef>> {
+    async fn workflow_runs(&self, _head_sha: &str) -> ForgeResult<Vec<WorkflowRun>> {
         Ok(self.runs.clone())
     }
 
-    async fn artifacts(&self, run: RunRef) -> ForgeResult<Vec<ArtifactMeta>> {
+    async fn artifacts(&self, run: &WorkflowRun) -> ForgeResult<Vec<ArtifactMeta>> {
         Ok(self
             .artifacts
             .iter()
-            .filter(|(r, _)| *r == run)
+            .filter(|(r, _)| *r == run.run)
             .map(|(_, meta)| meta.clone())
             .collect())
     }
@@ -184,7 +190,30 @@ fn fnv1a(bytes: &[u8]) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use vibe_check_host::forge::{CheckConclusion, NullForge};
+    use vibe_check_host::forge::{CheckConclusion, NullForge, RepoId, RunStatus};
+
+    fn repo() -> RepoId {
+        RepoId {
+            owner: "getkono".into(),
+            name: "vibe-check".into(),
+        }
+    }
+
+    fn workflow_run() -> WorkflowRun {
+        WorkflowRun {
+            run: RunRef { id: 7, attempt: 1 },
+            // The base repository, which is where the run executed — including
+            // for a fork pull request. See `forge.rs`.
+            repository: repo(),
+            head_repository: None,
+            head_sha: "9f3c".into(),
+            path: ".github/workflows/ci.yml".into(),
+            event: "pull_request".into(),
+            status: RunStatus::Completed,
+            conclusion: Some(CheckConclusion::Success),
+            created_at: jiff::Timestamp::UNIX_EPOCH,
+        }
+    }
 
     fn artifact_meta(id: u64) -> ArtifactMeta {
         ArtifactMeta {
@@ -193,6 +222,8 @@ mod tests {
             size_bytes: 3,
             expired: false,
             run: RunRef { id: 7, attempt: 1 },
+            repository: repo(),
+            workflow_path: ".github/workflows/ci.yml".into(),
             head_sha: "9f3c".into(),
             head_repo: None,
             created_at: jiff::Timestamp::UNIX_EPOCH,
@@ -245,13 +276,41 @@ mod tests {
     #[tokio::test]
     async fn downloads_hash_the_bytes_actually_received() {
         let forge = FakeForge::new().with_artifact(
-            RunRef { id: 7, attempt: 1 },
+            workflow_run(),
             artifact_meta(1),
             b"<testsuite/>".to_vec(),
         );
         let artifact = forge.download(&artifact_meta(1)).await.expect("download");
         assert_eq!(artifact.bytes(), b"<testsuite/>");
         assert!(artifact.sha256().starts_with("sha256:"));
+    }
+
+    #[tokio::test]
+    async fn an_artifact_listing_is_scoped_to_one_run_and_attempt() {
+        // A re-run produces a new attempt against the same run id, and the
+        // artifact an attempt uploaded belongs to that attempt. Listing across
+        // attempts is how stale evidence gets adopted after a re-run.
+        let first = workflow_run();
+        let retry = WorkflowRun {
+            run: RunRef { id: 7, attempt: 2 },
+            ..workflow_run()
+        };
+        let forge = FakeForge::new()
+            .with_artifact(first.clone(), artifact_meta(1), b"first".to_vec())
+            .with_artifact(retry.clone(), artifact_meta(2), b"second".to_vec());
+
+        let listed: Vec<_> = forge
+            .artifacts(&retry)
+            .await
+            .expect("artifacts")
+            .into_iter()
+            .map(|meta| meta.id)
+            .collect();
+        assert_eq!(listed, [2]);
+
+        // Both runs are discoverable, because each was named once.
+        let runs = forge.workflow_runs("9f3c").await.expect("runs");
+        assert_eq!(runs, [first, retry]);
     }
 
     #[tokio::test]
@@ -270,7 +329,7 @@ mod tests {
         assert_eq!(runs[0].conclusion, CheckConclusion::Success);
         assert!(
             forge
-                .artifacts(RunRef { id: 7, attempt: 1 })
+                .artifacts(&workflow_run())
                 .await
                 .expect("artifacts")
                 .is_empty()
