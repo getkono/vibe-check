@@ -160,6 +160,16 @@ impl TestRepo {
             // Neutralize the ambient environment. A developer's global git
             // configuration must not be able to change a test outcome — the same
             // reasoning that makes vibe-check itself pin these when it shells out.
+            //
+            // `GIT_DIR` and `GIT_WORK_TREE` are *removed* rather than pinned,
+            // because they are not configuration, they are redirection: both
+            // outrank `current_dir`, so an inherited one aims every command in
+            // this module at a repository the fixture never created. Git exports
+            // `GIT_DIR` into every hook process, so a test suite run from a git
+            // hook would otherwise `git init` over the real repository and commit
+            // fixture files into it.
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
             .env("GIT_CONFIG_GLOBAL", "/dev/null")
             .env("GIT_CONFIG_SYSTEM", "/dev/null")
             .env("GIT_AUTHOR_NAME", AUTHOR_NAME)
