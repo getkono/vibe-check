@@ -78,14 +78,18 @@ pub struct Panicked;
 
 /// Install the panic hook that records where a panic happened.
 ///
-/// Must run **after** `color_eyre::install()`, which installs a hook of its own
-/// and would otherwise replace this one.
+/// Must run **after** `color_eyre::install()`, whose own hook prints the
+/// backtrace a crash report is worth having.
 ///
-/// The hook records rather than prints, so that stdout stays exactly one JSON
-/// document even when the run ends in a panic. The message is printed to
-/// stderr by [`run_guarded`], alongside the bundle.
+/// This one *wraps* that hook rather than replacing it. Recording alone would
+/// buy a bundle at the cost of the report that says which line of which crate
+/// came apart, and a verdict nobody can act on is only half the job. The
+/// previous hook keeps printing, to stderr, so stdout stays exactly one JSON
+/// document; this hook only adds a note of the first panic for the bundle to
+/// carry.
 pub fn install() {
-    std::panic::set_hook(Box::new(|info| {
+    let previous = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
         let location = info.location().map_or_else(
             || "an unknown location".to_owned(),
             std::string::ToString::to_string,
@@ -94,6 +98,7 @@ pub fn install() {
             .payload_as_str()
             .unwrap_or("a panic with a non-string payload");
         let _ = FIRST_PANIC.set(format!("{payload} at {location}"));
+        previous(info);
     }));
 }
 
