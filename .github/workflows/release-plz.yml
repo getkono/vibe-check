@@ -16,6 +16,20 @@ jobs:
     permissions:
       contents: write
       pull-requests: read
+    # Two rapid pushes to master would otherwise race two release runs.
+    # `cancel-in-progress: false` because a release run pushes tags and cuts
+    # GitHub releases; cancelling mid-run leaves a partial, non-atomic set and a
+    # pushed tag is not cleanly retractable. Queueing is safe and
+    # self-correcting: `release-plz release` recomputes what is unreleased at run
+    # time, so a queued run releases exactly the remainder.
+    # The group is DELIBERATELY DISTINCT from release-plz-pr's
+    # `release-plz-${{ github.ref }}`. GitHub keeps at most one running plus one
+    # pending entry per group, so sharing a group would serialise the two jobs
+    # against each other and let a legitimate sibling be cancelled as a
+    # superseded pending entry. Do not tidy the two names into one.
+    concurrency:
+      group: release-plz-release-${{ github.ref }}
+      cancel-in-progress: false
     steps:
       # A release created by the default GITHUB_TOKEN does NOT trigger other
       # workflows, so the binary-build workflow would never fire. A GitHub App
@@ -35,8 +49,10 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
+      # rust-toolchain.toml pins the channel and components; `rustup show`
+      # materializes it so the pin is what actually runs.
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        run: rustup show
       - name: Run release-plz
         uses: release-plz/action@v0.5
         with:
@@ -67,8 +83,10 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
+      # rust-toolchain.toml pins the channel and components; `rustup show`
+      # materializes it so the pin is what actually runs.
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        run: rustup show
       - name: Run release-plz
         uses: release-plz/action@v0.5
         with:
