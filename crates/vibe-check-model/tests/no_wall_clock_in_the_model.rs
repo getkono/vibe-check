@@ -17,21 +17,18 @@
 //! the `TZ` read that can move a civil date by a day.
 //!
 //! This test is the second line, and it is deliberately not a superset. It
-//! scans the crate's source *text*, which reaches two places the lint does not:
+//! reaches exactly one thing the lint does not: **a name that resolves to no
+//! listed path.** A `fn now` this crate defines itself hands every caller the
+//! shortcut `DecisionTime` refuses to provide, and `clippy.toml` cannot ban a
+//! path that does not exist yet. Both a declaration and a call count.
 //!
-//! - **Inside macro invocations.** An AST guard sees a macro body as an
-//!   unparsed token stream, so a clock read inside one is invisible to a walk
-//!   over expressions. Clippy resolves paths and does see through macros, but
-//!   only for the paths on its list.
-//! - **Names that do not resolve to a listed path.** A `fn now` this crate
-//!   defines itself hands every caller the shortcut `DecisionTime` refuses to
-//!   provide, and `clippy.toml` cannot ban a path that does not exist yet.
-//!
-//! Both a declaration and a call count. It is not a reason to scan text rather
-//! than parse it that declarations are only visible to a scanner — an AST walk
-//! sees a `fn` item at least as well, and sees `now ()` and `now::<T>()`
-//! without being taught to. The reason is the macro body and the unlistable
-//! name.
+//! That is the whole of the residual, and two tempting additions to it are not
+//! real. Declarations are not a reason to scan text rather than parse it: an
+//! AST walk sees a `fn` item at least as well, and sees `now ()` and
+//! `now::<T>()` without being taught to. Nor are macro bodies: an AST walk over
+//! expressions would indeed lose a call inside one, but clippy resolves paths
+//! after expansion and was measured firing on `format!("{}", Timestamp::now())`
+//! at the call site's own column, so the lint already covers it.
 //!
 //! It is vacuous today, deliberately. The model crate contains no such call and
 //! none of its six dependencies would tempt one. It ships as a prospective
@@ -71,8 +68,10 @@ const FORBIDDEN_IDENTIFIERS: [&str; 2] = ["SystemTime", "Instant"];
 /// Handles line comments, ordinary and raw string literals, and character
 /// literals — the last only so that `'"'` cannot open a string that runs to the
 /// end of the file. A `'` that is not a complete character literal is a
-/// lifetime and is left alone. The workspace uses no block comments, and
-/// `clippy.toml` plus review are what keep it that way.
+/// lifetime and is left alone. Block comments are masked too, nesting-aware:
+/// the workspace contains none, but nothing enforces that — neither
+/// `clippy.toml` nor `rustfmt.toml` bans them, and review alone is what keeps
+/// it true.
 fn code_only(source: &str) -> String {
     let chars: Vec<char> = source.chars().collect();
     let mut out = String::with_capacity(source.len());
@@ -89,16 +88,13 @@ fn code_only(source: &str) -> String {
             continue;
         }
 
-        if character == 'r'
-            && !preceded_by_identifier(&chars, index)
-            && let Some(after) = raw_string(&chars, index, &mut out)
-        {
-            index = after;
+        if character == '/' && chars.get(index + 1) == Some(&'*') {
+            index = block_comment(&chars, index, &mut out);
             continue;
         }
 
-        if character == '"' {
-            index = ordinary_string(&chars, index, &mut out);
+        if let Some(after) = string_literal(&chars, index, &mut out) {
+            index = after;
             continue;
         }
 
@@ -138,12 +134,81 @@ fn stands_alone(line: &str, start: usize, end: usize) -> bool {
         && !line[end..].chars().next().is_some_and(identifier_char)
 }
 
-/// Blank a `r"…"` or `r#"…"#` literal, returning the index just past it.
+/// Blank a string literal of any prefix, returning the index just past it.
 ///
-/// `None` when the `r` at `index` begins an identifier rather than a literal.
-fn raw_string(chars: &[char], index: usize, out: &mut String) -> Option<usize> {
+/// Rust spells strings six ways — `"…"`, `b"…"`, `c"…"`, `r"…"`, `br"…"`,
+/// `cr"…"` — and the byte and C prefixes matter here for a reason that is not
+/// tidiness. `b` and `c` are identifier characters, so a scanner that only
+/// recognises a bare `r` treats `br"…"` as an identifier followed by an
+/// *ordinary* string, and then applies escape semantics that a raw string does
+/// not have. In `br"C:\path\"` the trailing backslash eats the closing quote,
+/// the mask runs on to the next `"` or to the end of the file, and every line
+/// it swallows is a line this guard no longer reads. That is the one failure
+/// direction that matters: it makes the test go green over a real clock read.
+fn string_literal(chars: &[char], index: usize, out: &mut String) -> Option<usize> {
+    let character = *chars.get(index)?;
+
+    if character == '"' {
+        return Some(ordinary_string(chars, index, out));
+    }
+    if !matches!(character, 'b' | 'c' | 'r') || preceded_by_identifier(chars, index) {
+        return None;
+    }
+
+    let after_prefix = if character == 'r' { index } else { index + 1 };
+    if chars.get(after_prefix) == Some(&'r') {
+        return raw_string(chars, index, after_prefix, out);
+    }
+    if chars.get(after_prefix) != Some(&'"') {
+        return None;
+    }
+
+    for _ in index..after_prefix {
+        out.push(' ');
+    }
+    Some(ordinary_string(chars, after_prefix, out))
+}
+
+/// Blank a nesting-aware `/* … */` comment, returning the index just past it.
+///
+/// The workspace contains none today. It is handled anyway because the
+/// alternative is a false positive on `/* never call now() here */`, and a
+/// false positive teaches an author to reword the prose rather than obey the
+/// rule — the exact incentive the masking above exists to remove.
+fn block_comment(chars: &[char], index: usize, out: &mut String) -> usize {
+    let mut depth = 0usize;
+    let mut cursor = index;
+
+    while cursor < chars.len() {
+        let pair = (chars[cursor], chars.get(cursor + 1).copied());
+        match pair {
+            ('/', Some('*')) => depth += 1,
+            ('*', Some('/')) => depth = depth.saturating_sub(1),
+            _ => {
+                out.push(if chars[cursor] == '\n' { '\n' } else { ' ' });
+                cursor += 1;
+                continue;
+            }
+        }
+        out.push(' ');
+        out.push(' ');
+        cursor += 2;
+        if depth == 0 {
+            return cursor;
+        }
+    }
+
+    cursor
+}
+
+/// Blank the raw-string body of a literal whose prefix begins at `start` and
+/// whose `r` sits at `r_at`, returning the index just past it.
+///
+/// `None` when what follows the `r` is not a literal after all, which is how an
+/// identifier such as `br` or `render` falls through to be scanned as code.
+fn raw_string(chars: &[char], start: usize, r_at: usize, out: &mut String) -> Option<usize> {
     let mut hashes = 0usize;
-    let mut cursor = index + 1;
+    let mut cursor = r_at + 1;
     while chars.get(cursor) == Some(&'#') {
         hashes += 1;
         cursor += 1;
@@ -152,7 +217,7 @@ fn raw_string(chars: &[char], index: usize, out: &mut String) -> Option<usize> {
         return None;
     }
 
-    for _ in index..=cursor {
+    for _ in start..=cursor {
         out.push(' ');
     }
     cursor += 1;
@@ -369,18 +434,24 @@ fn the_model_crate_never_reads_a_clock() {
 #[test]
 fn the_scanner_sees_the_calls_that_matter() {
     // The specific changes this file exists to prevent, run through the scanner
-    // to prove the assertion above is reachable rather than vacuous. The last
-    // is the one an AST walk over expressions does not see, because the macro
-    // body reaches it as an unparsed token stream.
+    // to prove the assertion above is reachable rather than vacuous.
+    //
+    // The macro line is kept for a narrower reason than it once claimed: the
+    // lint already catches it, but it is the spelling a *future* AST guard
+    // would lose, since a macro body reaches such a walk as an unparsed token
+    // stream. The `br"…"` line below it is the one that swallowed a real clock
+    // read before `string_literal` learned the byte and C prefixes.
     let sample = r##"
 let at = jiff::Timestamp::now();
 let zoned = jiff::Zoned::now();
 let since = std::time::SystemTime::UNIX_EPOCH.elapsed();
 let measured = Instant::now();
 tracing::info!("generated at {}", Timestamp::now());
+let path = br"C:\path\";
+let t = Timestamp::now();
 "##;
 
-    assert_eq!(wall_clock_lines(sample), vec![2, 3, 4, 5, 6]);
+    assert_eq!(wall_clock_lines(sample), vec![2, 3, 4, 5, 6, 8]);
 }
 
 #[test]
@@ -419,7 +490,7 @@ fn the_scanner_ignores_prose_and_lookalike_identifiers() {
     // produce without the masking above. The trailing comment and the strings
     // are the ones that matter: rewording an error message must never be the
     // way to make this test pass.
-    let sample = r##"
+    let sample = r####"
 /// There is deliberately no `now()` on this type.
 // let evaded = Timestamp::now();
 let a = 1; // there is no now() here
@@ -429,18 +500,24 @@ let wrapped = format!(
      not now(), and never SystemTime"
 );
 let raw = r#"now() and SystemTime in a raw string"#;
+let nested = r###"now() inside a nested raw string"###;
+let bytes = b"now() in a byte string";
+let cstr = c"now() in a C string";
+/* never call now() here, and never SystemTime */
+/* nested /* now() */ still a comment */
 fn snow(depth: u8) {}
 let known = knowns.get(key);
 struct Now(Timestamp);
 let quote = '"';
 fn borrow<'a>(now: &'a str) {}
-"##;
+"####;
 
     assert!(
         wall_clock_lines(sample).is_empty(),
-        "prose, error messages, raw strings, a char literal holding a quote, \
-         and identifiers that merely contain those letters are not clock \
-         reads; found lines {:?}",
+        "prose, error messages, raw and byte and C strings, block comments \
+         including nested ones, a char literal holding a quote, and \
+         identifiers that merely contain those letters are not clock reads; \
+         found lines {:?}",
         wall_clock_lines(sample)
     );
 }
