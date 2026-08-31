@@ -113,7 +113,7 @@ fn nothing_else_can_construct_one_under_another_name() {
 
     let impls: usize = common::workspace_sources()
         .iter()
-        .map(|(_, file)| common::impls_for(&common::items(file), "BundleCore").len())
+        .map(|(_, file)| common::impls_for(file.items(), "BundleCore").len())
         .sum();
     assert_eq!(
         impls, 1,
@@ -129,7 +129,7 @@ fn the_reader_tells_a_literal_from_a_declaration_or_a_return_type() {
     // case by hand, and the one true positive it had to keep. `-> BundleCore {`
     // is a return type followed by the function's own opening brace; missing it
     // would make every function returning one report itself.
-    let sample = common::parse(
+    let sample = common::read(
         "sample",
         r"
 pub struct BundleCore {
@@ -175,7 +175,7 @@ fn the_reader_resolves_a_self_literal_to_the_impl_it_sits_in() {
     // BundleCore` is the shape that matters, and it is also the shape a scan for
     // `Self {` alone could not attribute to any particular type — the third impl
     // here builds a `SomethingElse` with identical text.
-    let sample = common::parse(
+    let sample = common::read(
         "sample",
         r"
 impl BundleCore {
@@ -203,14 +203,14 @@ impl Default for SomethingElse {
          confused for it"
     );
 
-    let items = common::items(&sample);
+    let items = sample.items();
     assert_eq!(
-        common::impls_for(&items, "BundleCore").len(),
+        common::impls_for(items, "BundleCore").len(),
         2,
         "the inherent impl and the trait impl"
     );
     assert_eq!(
-        common::impls_for(&items, "SomethingElse").len(),
+        common::impls_for(items, "SomethingElse").len(),
         1,
         "and one type's impls are not another's"
     );
@@ -223,7 +223,7 @@ fn a_fixture_in_a_modules_own_tests_is_not_a_construction_site() {
     // *below* a test module is still found. Truncation left `sneaky` unscanned,
     // which is precisely where a second constructor would end up if someone were
     // avoiding this test.
-    let sample = common::parse(
+    let sample = common::read(
         "sample",
         r"
 fn real() -> BundleCore {
@@ -264,7 +264,7 @@ fn a_literal_nested_inside_an_expression_is_still_a_construction_site() {
     // inside a closure, a `match` arm, or another struct's field is the same
     // construction, and the reader walks the whole expression tree rather than
     // the item headers.
-    let sample = common::parse(
+    let sample = common::read(
         "sample",
         r"
 fn assemble() -> EvidenceBundle {
@@ -287,5 +287,93 @@ fn assemble() -> EvidenceBundle {
         found,
         ["assemble", "assemble"],
         "a literal in a `match` arm and one inside a closure are both sites"
+    );
+}
+
+#[test]
+fn a_literal_written_inside_a_macro_is_a_construction_site() {
+    // The regression a naive parse introduced: `syn` treats a `macro_rules!`
+    // body as opaque tokens, so a literal written there is invisible to the
+    // tree while the text scan this file replaced could still see it. A macro
+    // is a construction site in every expansion of itself, and a `..core`
+    // functional update is the shape that overwrites exactly one field — the
+    // one this whole file exists to say can never be corrected.
+    let sample = common::read(
+        "sample",
+        r"
+macro_rules! retier {
+    ($core:expr, $tier:expr) => {
+        BundleCore { tier: $tier, ..$core }
+    };
+}
+
+/// A public re-tiering entry point.
+pub fn retiered(core: BundleCore, tier: Tier) -> BundleCore {
+    retier!(core, tier)
+}
+",
+    );
+    let found: Vec<Literal> = common::struct_literals(&sample)
+        .into_iter()
+        .filter(|literal| literal.type_name == "BundleCore")
+        .collect();
+
+    assert_eq!(found.len(), 1, "the literal inside the macro body");
+    assert_eq!(
+        found[0].function, "<none>",
+        "a macro body sits in no function, which is itself enough to fail the \
+         `must be `BundleCore::new`` assertion above"
+    );
+}
+
+#[test]
+fn a_literal_inside_a_const_block_is_a_construction_site() {
+    // `const _: () = { … };` and a function body are both places a literal can
+    // be written that a walk over top-level items and modules never reaches.
+    let sample = common::read(
+        "sample",
+        r"
+const SEED: BundleCore = { BundleCore { tier } };
+fn outer() {
+    fn inner() -> BundleCore {
+        BundleCore { tier }
+    }
+}
+",
+    );
+    let found: Vec<String> = common::struct_literals(&sample)
+        .into_iter()
+        .filter(|literal| literal.type_name == "BundleCore")
+        .map(|literal| literal.function)
+        .collect();
+
+    assert_eq!(found, ["<none>", "inner"], "both, and each attributed");
+}
+
+#[test]
+fn a_cfg_not_test_construction_site_is_a_construction_site() {
+    let sample = common::read(
+        "sample",
+        r"
+#[cfg(not(test))]
+fn ships() -> BundleCore {
+    BundleCore { tier }
+}
+#[cfg(test)]
+fn fixture() -> BundleCore {
+    BundleCore { tier }
+}
+",
+    );
+    let found: Vec<String> = common::struct_literals(&sample)
+        .into_iter()
+        .filter(|literal| literal.type_name == "BundleCore")
+        .map(|literal| literal.function)
+        .collect();
+
+    assert_eq!(
+        found,
+        ["ships"],
+        "`not(test)` is in the artifact people link against; `test` is not"
     );
 }

@@ -69,25 +69,25 @@ const RESOLUTION: &str = include_str!("../src/resolution.rs");
 const WRITABLE_VIEWS: [&str; 4] = ["DerefMut", "AsMut", "BorrowMut", "IndexMut"];
 
 /// `accumulator.rs`, parsed, with its own tests skipped.
-fn accumulator() -> syn::File {
-    common::parse("accumulator.rs", ACCUMULATOR)
+fn accumulator() -> common::Source {
+    common::read("accumulator.rs", ACCUMULATOR)
 }
 
 /// `enforcement.rs`, parsed, with its own tests skipped.
-fn enforcement() -> syn::File {
-    common::parse("enforcement.rs", ENFORCEMENT)
+fn enforcement() -> common::Source {
+    common::read("enforcement.rs", ENFORCEMENT)
 }
 
 /// `resolution.rs`, parsed, with its own tests skipped.
-fn resolution() -> syn::File {
-    common::parse("resolution.rs", RESOLUTION)
+fn resolution() -> common::Source {
+    common::read("resolution.rs", RESOLUTION)
 }
 
 #[test]
 fn escalate_is_the_only_mutator_on_the_adjudicator() {
     let file = accumulator();
-    let items = common::items(&file);
-    let mutators: Vec<String> = common::functions(&items)
+    let items = file.items();
+    let mutators: Vec<String> = common::functions(items)
         .into_iter()
         .filter(|function| function.receiver == Receiver::RefMut)
         .map(|function| function.path())
@@ -116,8 +116,8 @@ fn no_consuming_builder_returns_an_adjudicator() {
     // type and not about the receiver: consuming an adjudicator to produce
     // something that is not one is exactly how a verdict is meant to be sealed.
     let file = accumulator();
-    let items = common::items(&file);
-    let builders: Vec<String> = common::functions(&items)
+    let items = file.items();
+    let builders: Vec<String> = common::functions(items)
         .into_iter()
         .filter(|function| {
             function.owner.as_deref() == Some("Adjudicator")
@@ -148,8 +148,8 @@ fn only_new_produces_an_adjudicator() {
     // `Adjudicators::route` and `Adjudicators::integrity`, which return
     // `&mut Adjudicator` by design and are the supported way to reach one.
     let file = accumulator();
-    let items = common::items(&file);
-    let producers: Vec<String> = common::functions(&items)
+    let items = file.items();
+    let producers: Vec<String> = common::functions(items)
         .into_iter()
         .filter(|function| function.returns.as_deref() == Some("Adjudicator"))
         .map(|function| function.path())
@@ -171,7 +171,7 @@ fn only_new_produces_an_adjudicator() {
 fn the_accumulator_module_has_no_children() {
     // A child module would inherit access to the private `tier` field.
     let file = accumulator();
-    let declarations = common::module_declarations(&common::top_level_items(&file));
+    let declarations = common::module_declarations(file.items());
     assert!(
         declarations.is_empty(),
         "`adjudicate::accumulator` must have no submodules, found: {declarations:#?}\n\
@@ -189,7 +189,7 @@ fn the_enforcement_module_has_no_children() {
     // from something called `integrity`. Either is a downward operation wearing
     // a different word, and nothing in the type system would object.
     let file = enforcement();
-    let declarations = common::module_declarations(&common::top_level_items(&file));
+    let declarations = common::module_declarations(file.items());
     assert!(
         declarations.is_empty(),
         "`adjudicate::enforcement` must have no submodules, found: {declarations:#?}"
@@ -201,8 +201,8 @@ fn the_known_module_has_no_children() {
     // Same reasoning: a child of `known` could match on the private `Inner` enum
     // and read an unresolved identifier without escalating, which is the one
     // thing `Known::get` exists to prevent.
-    let file = common::parse("known.rs", KNOWN);
-    let declarations = common::module_declarations(&common::top_level_items(&file));
+    let file = common::read("known.rs", KNOWN);
+    let declarations = common::module_declarations(file.items());
     assert!(
         declarations.is_empty(),
         "`known` must have no submodules, found: {declarations:#?}"
@@ -221,8 +221,8 @@ fn routing_is_not_public() {
     // this crate is `integrity()`, which is the enforcing ledger. That is what
     // makes the behavioural tests exhaustive rather than illustrative.
     let file = enforcement();
-    let items = common::items(&file);
-    let route: Vec<Vis> = common::functions(&items)
+    let items = file.items();
+    let route: Vec<Vis> = common::functions(items)
         .into_iter()
         .filter(|function| {
             function.owner.as_deref() == Some("Adjudicators") && function.name == "route"
@@ -257,9 +257,9 @@ fn the_advisory_adjudication_yields_no_verdict() {
     // Adjudication` hands out the same thing under a trait's name, and so do
     // `TryFrom` and `Into`, which the old text scan could not see at all.
     let file = enforcement();
-    let items = common::items(&file);
+    let items = file.items();
 
-    let methods = common::functions(&items);
+    let methods = common::functions(items);
     let advisory: Vec<_> = methods
         .iter()
         .filter(|function| function.owner.as_deref() == Some("AdvisoryAdjudication"))
@@ -281,7 +281,7 @@ fn the_advisory_adjudication_yields_no_verdict() {
          exactly one."
     );
 
-    let converted: Vec<String> = common::conversions(&items)
+    let converted: Vec<String> = common::conversions(items)
         .into_iter()
         .filter(|conversion| conversion.source == "AdvisoryAdjudication")
         .map(|conversion| conversion.rendered())
@@ -310,8 +310,8 @@ fn the_adjudicators_tier_field_is_private() {
     // fine: it has no mutator at all, so a public field on it cannot be used to
     // lower anything.
     let file = accumulator();
-    let items = common::items(&file);
-    let fields = common::struct_fields(&items, "Adjudicator");
+    let items = file.items();
+    let fields = common::struct_fields(items, "Adjudicator");
 
     let tier = fields
         .iter()
@@ -328,9 +328,9 @@ fn the_adjudicators_tier_field_is_private() {
 #[test]
 fn the_adjudicator_exposes_no_escape_hatches() {
     let file = accumulator();
-    let items = common::items(&file);
+    let items = file.items();
 
-    let views: Vec<String> = common::traits_implemented_for(&items, "Adjudicator")
+    let views: Vec<String> = common::traits_implemented_for(items, "Adjudicator")
         .into_iter()
         .filter(|name| WRITABLE_VIEWS.contains(&name.as_str()))
         .collect();
@@ -344,18 +344,42 @@ fn the_adjudicator_exposes_no_escape_hatches() {
          that can be lowered."
     );
 
-    let setters: Vec<String> = common::functions(&items)
+    // Unscoped by owner, deliberately. The obvious escape hatch is a method,
+    // but `pub fn set_tier(adjudicator: &mut Adjudicator, tier: Tier)` written
+    // beside the type does the same job with no receiver at all — field privacy
+    // is module-scoped, so the assignment is legal from anywhere in this file,
+    // and `escalate_is_the_only_mutator_on_the_adjudicator` cannot see it
+    // because a `&mut Adjudicator` *parameter* is not a `&mut self` receiver.
+    let setters: Vec<String> = common::functions(items)
         .into_iter()
-        .filter(|function| {
-            function.owner.as_deref() == Some("Adjudicator")
-                && matches!(function.name.as_str(), "set_tier" | "tier_mut")
-        })
+        .filter(|function| matches!(function.name.as_str(), "set_tier" | "tier_mut"))
         .map(|function| function.path())
         .collect();
     assert!(
         setters.is_empty(),
         "`{setters:?}` would allow a tier to be assigned rather than joined, \
          which makes lowering a verdict expressible"
+    );
+
+    let borrowers: Vec<String> = common::functions(items)
+        .into_iter()
+        .filter(|function| {
+            function
+                .mutably_borrows
+                .iter()
+                .any(|parameter| parameter == "Adjudicator")
+        })
+        .map(|function| function.path())
+        .collect();
+    assert!(
+        borrowers.is_empty(),
+        "nothing in this file may take a `&mut Adjudicator` as a parameter: \
+         {borrowers:#?}\n\
+         \n\
+         Inside this module a `&mut Adjudicator` is write access to a private \
+         `tier`, and it arrives with no receiver for a rule about receivers to \
+         catch. `escalate` is a method for exactly this reason: the mutation \
+         has to be reachable only through the type's own API."
     );
 }
 
@@ -370,9 +394,9 @@ fn the_adjudicator_has_no_default() {
     // with its reasoning next to the type. This test is what stops someone
     // silencing that lint the other way.
     let file = accumulator();
-    let items = common::items(&file);
+    let items = file.items();
     assert!(
-        !common::traits_implemented_for(&items, "Adjudicator").contains(&"Default".to_owned()),
+        !common::traits_implemented_for(items, "Adjudicator").contains(&"Default".to_owned()),
         "`Adjudicator` must not implement `Default`; the type's own documentation \
          explains why, and an impl that contradicts its documentation is worse \
          than either one alone"
@@ -398,8 +422,8 @@ fn accounting_is_not_public() {
     // `account_into` are simply two different functions, and the hazard is gone
     // rather than documented.
     let file = resolution();
-    let items = common::items(&file);
-    let methods = common::functions(&items);
+    let items = file.items();
+    let methods = common::functions(items);
 
     let account = methods
         .iter()
@@ -437,7 +461,7 @@ fn accounting_is_not_public() {
 
 #[test]
 fn the_receiver_reader_tells_a_consuming_builder_from_a_getter() {
-    let sample = common::parse(
+    let sample = common::read(
         "sample",
         r"
         impl Adjudicator {
@@ -453,8 +477,8 @@ fn the_receiver_reader_tells_a_consuming_builder_from_a_getter() {
         }
         ",
     );
-    let items = common::items(&sample);
-    let read = common::functions(&items);
+    let items = sample.items();
+    let read = common::functions(items);
 
     let mutators: Vec<String> = read
         .iter()
@@ -486,7 +510,7 @@ fn the_receiver_reader_tells_a_consuming_builder_from_a_getter() {
 
 #[test]
 fn the_return_type_reader_resolves_self_to_the_impl() {
-    let sample = common::parse(
+    let sample = common::read(
         "sample",
         r"
         impl Adjudicator {
@@ -497,8 +521,8 @@ fn the_return_type_reader_resolves_self_to_the_impl() {
         }
         ",
     );
-    let items = common::items(&sample);
-    let producers: Vec<String> = common::functions(&items)
+    let items = sample.items();
+    let producers: Vec<String> = common::functions(items)
         .into_iter()
         .filter(|function| function.returns.as_deref() == Some("Adjudicator"))
         .map(|function| function.name)
@@ -515,7 +539,7 @@ fn the_return_type_reader_resolves_self_to_the_impl() {
 
 #[test]
 fn the_trait_reader_sees_a_writable_view_however_it_is_pathed() {
-    let sample = common::parse(
+    let sample = common::read(
         "sample",
         r"
         impl core::ops::DerefMut for Adjudicator {}
@@ -526,8 +550,8 @@ fn the_trait_reader_sees_a_writable_view_however_it_is_pathed() {
         impl DerefMut for SomethingElse {}
         ",
     );
-    let items = common::items(&sample);
-    let found: Vec<String> = common::traits_implemented_for(&items, "Adjudicator")
+    let items = sample.items();
+    let found: Vec<String> = common::traits_implemented_for(items, "Adjudicator")
         .into_iter()
         .filter(|name| WRITABLE_VIEWS.contains(&name.as_str()))
         .collect();
@@ -543,7 +567,7 @@ fn the_trait_reader_sees_a_writable_view_however_it_is_pathed() {
 
 #[test]
 fn the_visibility_reader_tells_pub_from_pub_crate() {
-    let sample = common::parse(
+    let sample = common::read(
         "sample",
         r"
         impl CapabilityResolution {
@@ -554,8 +578,8 @@ fn the_visibility_reader_tells_pub_from_pub_crate() {
         }
         ",
     );
-    let items = common::items(&sample);
-    let read = common::functions(&items);
+    let items = sample.items();
+    let read = common::functions(items);
 
     let account = read.iter().find(|f| f.name == "account").unwrap();
     let account_into = read.iter().find(|f| f.name == "account_into").unwrap();
@@ -571,7 +595,7 @@ fn the_visibility_reader_tells_pub_from_pub_crate() {
 
 #[test]
 fn the_field_reader_tells_a_private_field_from_a_public_one() {
-    let sample = common::parse(
+    let sample = common::read(
         "sample",
         r"
         pub struct Adjudicator {
@@ -580,9 +604,9 @@ fn the_field_reader_tells_a_private_field_from_a_public_one() {
         }
         ",
     );
-    let items = common::items(&sample);
+    let items = sample.items();
     assert_eq!(
-        common::struct_fields(&items, "Adjudicator"),
+        common::struct_fields(items, "Adjudicator"),
         vec![
             ("tier".to_owned(), Vis::Inherited),
             ("ledger".to_owned(), Vis::Public),
@@ -596,7 +620,7 @@ fn the_reader_sees_a_module_declared_below_a_test_module() {
     // child module written below `mod tests` has exactly the same write access
     // to a private field as one written above it, and truncation could not see
     // it at all.
-    let sample = common::parse(
+    let sample = common::read(
         "sample",
         r"
 mod above;
@@ -609,7 +633,7 @@ mod below;
     );
 
     assert_eq!(
-        common::module_declarations(&common::top_level_items(&sample)),
+        common::module_declarations(sample.items()),
         ["above", "below"],
         "both real children, and neither the test module nor anything inside it"
     );
@@ -617,7 +641,7 @@ mod below;
 
 #[test]
 fn the_conversion_reader_sees_every_spelling_out_of_the_advisory_ledger() {
-    let sample = common::parse(
+    let sample = common::read(
         "sample",
         r"
         impl From<AdvisoryAdjudication> for Adjudication {}
@@ -626,8 +650,8 @@ fn the_conversion_reader_sees_every_spelling_out_of_the_advisory_ledger() {
         impl From<EnforcedAdjudication> for Adjudication {}
         ",
     );
-    let items = common::items(&sample);
-    let out: Vec<String> = common::conversions(&items)
+    let items = sample.items();
+    let out: Vec<String> = common::conversions(items)
         .into_iter()
         .filter(|conversion| conversion.source == "AdvisoryAdjudication")
         .map(|conversion| conversion.via)
@@ -640,4 +664,120 @@ fn the_conversion_reader_sees_every_spelling_out_of_the_advisory_ledger() {
          `From<AdvisoryAdjudication>`; the enforced ledger's conversion is not \
          this rule's business"
     );
+}
+
+#[test]
+fn the_reader_tells_a_test_gate_from_its_negation() {
+    // "Does the `cfg` mention `test`" also matched `not(test)`, which is the
+    // form that ships — so a `mod helpers;` or an `impl Default` behind it was
+    // dropped from every guard in this file without a word.
+    let sample = common::read(
+        "sample",
+        r#"
+#[cfg(not(test))]
+mod ships;
+#[cfg(test)]
+mod fixtures;
+#[cfg(all(test, feature = "e2e"))]
+mod slow;
+#[cfg(any(test, unix))]
+mod platform;
+#[cfg(feature = "e2e")]
+mod gated;
+"#,
+    );
+
+    assert_eq!(
+        common::module_declarations(sample.items()),
+        ["ships", "platform", "gated"],
+        "`not(test)` and `any(test, unix)` both ship; `test` and \
+         `all(test, …)` do not"
+    );
+}
+
+#[test]
+fn a_free_function_taking_a_mutable_adjudicator_is_an_escape_hatch() {
+    // The hole scoping the escape-hatch rule to methods opened. Field privacy
+    // is module-scoped, so this assigns `tier` legally — and it has no
+    // receiver, so the `&mut self` rule cannot see it either.
+    let sample = common::read(
+        "sample",
+        r"
+        pub fn set_tier(adjudicator: &mut Adjudicator, tier: Tier) {
+            adjudicator.tier = tier;
+        }
+        pub fn inspect(adjudicator: &Adjudicator) -> Tier {
+            adjudicator.tier
+        }
+        impl Adjudicator {
+            pub fn escalate(&mut self, at_least: Tier) {}
+        }
+        ",
+    );
+    let read = common::functions(sample.items());
+
+    assert_eq!(
+        read.iter()
+            .filter(|function| function.mutably_borrows.iter().any(|p| p == "Adjudicator"))
+            .map(|function| function.name.clone())
+            .collect::<Vec<_>>(),
+        ["set_tier"],
+        "the mutable borrow, and neither the shared one nor the receiver"
+    );
+    assert_eq!(
+        read.iter()
+            .filter(|function| function.receiver == Receiver::RefMut)
+            .map(|function| function.name.clone())
+            .collect::<Vec<_>>(),
+        ["escalate"],
+        "and the receiver rule genuinely cannot see the free function, which \
+         is why both are asserted"
+    );
+}
+
+#[test]
+fn the_trait_reader_sees_a_derive() {
+    // `#[derive(Default)]` and `impl Default for Adjudicator` produce the same
+    // public `Adjudicator::default()`, and the derive is the more idiomatic of
+    // the two. A rule that only knew the impl was a rule about spelling.
+    let sample = common::read(
+        "sample",
+        r"
+        #[derive(Debug, Default)]
+        pub struct Adjudicator {
+            tier: Tier,
+        }
+        #[derive(Clone)]
+        pub struct Adjudication {}
+        ",
+    );
+    let traits = common::traits_implemented_for(sample.items(), "Adjudicator");
+
+    assert_eq!(traits, ["Debug", "Default"]);
+    assert!(
+        !common::traits_implemented_for(sample.items(), "Adjudication")
+            .contains(&"Default".to_owned()),
+        "and one type's derive list is not another's"
+    );
+}
+
+#[test]
+fn an_item_inside_a_const_block_is_read() {
+    // `const _: () = { … };` registers an impl globally while sitting inside an
+    // initialiser, where a walk over modules alone never looks.
+    let sample = common::read(
+        "sample",
+        r"
+        const _: () = {
+            impl core::ops::DerefMut for Adjudicator {}
+            mod helpers {}
+        };
+        ",
+    );
+
+    assert!(
+        common::traits_implemented_for(sample.items(), "Adjudicator")
+            .contains(&"DerefMut".to_owned())
+    );
+    assert_eq!(common::module_declarations(sample.items()), ["helpers"]);
 }

@@ -126,8 +126,12 @@ syn = { version = "2.0.119", default-features = false, features = [
   "full",
   "visit",
   "clone-impls",
-  "printing",
 ] }
+# Token trees, for the one thing a syntax tree cannot give: the body of a
+# `macro_rules!` definition, which `syn` hands back as opaque tokens. The guards
+# substitute the metavariables and re-parse, because an `impl` written inside a
+# macro is an `impl` in every expansion of it.
+proc-macro2 = { version = "1.0.107", default-features = false }
 proptest = "1.11.0"
 insta    = { version = "1.48.0", features = ["json", "redactions"] }
 tempfile = "3.27.0"

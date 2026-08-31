@@ -69,12 +69,32 @@ use common::Conversion;
 /// whole hole.
 const FORBIDDEN_TARGETS: [&str; 2] = ["Evidence", "Artifact"];
 
-/// The one function allowed to produce each forbidden target.
+/// Whether `function` is the one thing allowed to produce `produced`.
 ///
-/// Written as `(type, function)` pairs rather than as bare names so that a new
-/// `Evidence::new` is a failure rather than a coincidence of naming.
-const SANCTIONED_CONSTRUCTORS: [(&str, &str); 2] =
-    [("Evidence", "from_parsed"), ("Artifact", "new")];
+/// Matched on the function's *context*, not on its name alone, so that a free
+/// `fn from_parsed() -> Evidence` written somewhere else is a failure rather
+/// than a coincidence of naming.
+///
+/// `ForgeRead::download` is the third entry and the only one that is not an
+/// associated function of the type it builds. It is the sole honest source of
+/// an `Artifact`: it downloads the bytes, hashes them, and calls
+/// `Artifact::new`. Sanctioned by *trait*, so the declaration and every
+/// implementation of that one method are covered and nothing else is — an
+/// inherent `download` on some other type inherits no exemption. That is what
+/// lets the return-type reader see through `Result` everywhere else.
+fn is_sanctioned(function: &common::Function, produced: &str) -> bool {
+    match produced {
+        "Evidence" => {
+            function.owner.as_deref() == Some("Evidence") && function.name == "from_parsed"
+        }
+        "Artifact" => {
+            (function.owner.as_deref() == Some("Artifact") && function.name == "new")
+                || (function.owner_trait.as_deref() == Some("ForgeRead")
+                    && function.name == "download")
+        }
+        _ => false,
+    }
+}
 
 /// Types that must never appear as the *source* of a conversion.
 ///
@@ -101,7 +121,7 @@ const FORBIDDEN_SOURCES: [&str; 5] = [
 fn workspace_conversions() -> Vec<(String, Conversion)> {
     let mut found = Vec::new();
     for (path, file) in common::workspace_sources() {
-        for conversion in common::conversions(&common::items(&file)) {
+        for conversion in common::conversions(file.items()) {
             found.push((path.to_string(), conversion));
         }
     }
@@ -170,25 +190,28 @@ fn nothing_but_the_sanctioned_constructor_produces_one() {
     // is the identical laundering with no trait involved, and no scan for `impl
     // From<` would ever have seen it.
     //
-    // `Result<_, _>` and `ForgeResult<_>` are deliberately *not* unwrapped when
-    // a return type is reduced to its base identifier. "A fallible operation
-    // that may yield one" is a different claim from "a value of this type", and
-    // unwrapping them would make `Forge::download` — whose entire job is to
-    // produce an `Artifact` from bytes it just downloaded and hashed — report
-    // itself.
+    // `Result<_, _>` and `ForgeResult<_>` are unwrapped along with `Box`,
+    // `Option` and the rest. Leaving them opaque was an earlier decision made
+    // to protect `ForgeRead::download`, and it was wrong twice over: it protected
+    // that one function by handing every other function a bypass, and the
+    // bypass was the motivating example's own signature made fallible —
+    //
+    //     fn evidence_from_check_run(..) -> Result<Evidence, Infallible>
+    //
+    // — which is a laundering with an extra `Ok` around it. Nothing in the
+    // workspace returns `Result<Evidence, _>`, so unwrapping costs nothing;
+    // `download` is sanctioned by name and trait instead.
     let mut offenders = Vec::new();
 
     for (path, file) in common::workspace_sources() {
-        for function in common::functions(&common::items(&file)) {
+        for function in common::functions(file.items()) {
             let Some(produced) = function.returns.as_deref() else {
                 continue;
             };
             if !FORBIDDEN_TARGETS.contains(&produced) {
                 continue;
             }
-            let sanctioned = SANCTIONED_CONSTRUCTORS.contains(&(produced, function.name.as_str()))
-                && function.owner.as_deref() == Some(produced);
-            if !sanctioned {
+            if !is_sanctioned(&function, produced) {
                 offenders.push(format!("{path}: fn {} -> {produced}", function.path()));
             }
         }
@@ -196,7 +219,7 @@ fn nothing_but_the_sanctioned_constructor_produces_one() {
 
     assert!(
         offenders.is_empty(),
-        "only `Evidence::from_parsed` and `Artifact::new` may produce one:\n{}\n\
+        "only `Evidence::from_parsed`, `Artifact::new` and `ForgeRead::download` may produce one:\n{}\n\
          \n\
          Both constructors take the thing that makes the value honest — a \
          `ParsedEvidence` that could only come from a parse that succeeded, and \
@@ -217,7 +240,7 @@ fn nothing_but_the_sanctioned_constructor_produces_one() {
 fn the_reader_normalizes_every_spelling_of_the_impl_that_matters() {
     // The four bypasses the text scanner had, planted together. Each must come
     // back as the same conversion: out of a check run, into evidence.
-    let sample = common::parse(
+    let sample = common::read(
         "sample",
         r"
         /// There is no `impl From<CheckRun> for Evidence` anywhere.
@@ -230,8 +253,8 @@ fn the_reader_normalizes_every_spelling_of_the_impl_that_matters() {
         fn generic<T>(value: T) where T: From<u8> {}
         ",
     );
-    let items = common::items(&sample);
-    let found = common::conversions(&items);
+    let items = sample.items();
+    let found = common::conversions(items);
 
     assert_eq!(
         found,
@@ -274,7 +297,7 @@ fn the_reader_does_not_confuse_an_evidence_bundle_for_evidence() {
     // public type and a conversion into one says nothing about check runs; a
     // guard that matched `Evidence` as a substring would fail on it, which is
     // the false positive that makes people delete guards.
-    let sample = common::parse(
+    let sample = common::read(
         "sample",
         r"
         impl From<Parts> for EvidenceBundle {}
@@ -282,16 +305,16 @@ fn the_reader_does_not_confuse_an_evidence_bundle_for_evidence() {
         fn assemble(parts: Parts) -> EvidenceBundle { EvidenceBundle {} }
         ",
     );
-    let items = common::items(&sample);
+    let items = sample.items();
 
     assert!(
-        common::conversions(&items)
+        common::conversions(items)
             .iter()
             .all(|conversion| !FORBIDDEN_TARGETS.contains(&conversion.target.as_str())),
         "`EvidenceBundle` and `EvidenceFacts` are not `Evidence`"
     );
     assert!(
-        common::functions(&items)
+        common::functions(items)
             .iter()
             .all(|function| function.returns.as_deref() != Some("Evidence")),
         "and neither is a function that returns one"
@@ -301,7 +324,7 @@ fn the_reader_does_not_confuse_an_evidence_bundle_for_evidence() {
 #[test]
 fn the_reader_sees_a_free_function_that_launders_a_check_run() {
     // No trait, no impl, and every text scan in the tree's history blind to it.
-    let sample = common::parse(
+    let sample = common::read(
         "sample",
         r"
         fn evidence_from_check_run(run: &CheckRun) -> Evidence { todo!() }
@@ -310,8 +333,8 @@ fn the_reader_sees_a_free_function_that_launders_a_check_run() {
         }
         ",
     );
-    let items = common::items(&sample);
-    let producers: Vec<String> = common::functions(&items)
+    let items = sample.items();
+    let producers: Vec<String> = common::functions(items)
         .into_iter()
         .filter(|function| {
             function
@@ -331,34 +354,76 @@ fn the_reader_sees_a_free_function_that_launders_a_check_run() {
 }
 
 #[test]
-fn a_fallible_download_is_not_a_second_constructor() {
-    // The rule above must not fire on `Forge::download`, which is the *only*
-    // honest way an `Artifact` comes into existence: it downloads the bytes and
-    // hashes them, then calls `Artifact::new`. A guard that unwrapped `Result`
-    // would flag the sanctioned path and would be deleted rather than obeyed.
-    let sample = common::parse(
+fn a_fallible_producer_is_still_a_producer() {
+    // The bypass that unwrapping `Result` closes: the motivating example's own
+    // signature, made fallible. An `Ok(evidence)` is an evidence.
+    let sample = common::read(
         "sample",
         r"
-        trait Forge {
-            async fn download(&self, meta: &ArtifactMeta) -> ForgeResult<Artifact>;
-            async fn artifacts(&self, run: &WorkflowRun) -> ForgeResult<Vec<ArtifactMeta>>;
+        pub fn evidence_from_check_run(
+            _conclusion: &str,
+        ) -> Result<Evidence, core::convert::Infallible> {
+            unimplemented!()
         }
         ",
     );
-    let items = common::items(&sample);
-    let returns: Vec<Option<String>> = common::functions(&items)
-        .into_iter()
-        .map(|function| function.returns)
-        .collect();
+    let read = common::functions(sample.items());
 
     assert_eq!(
-        returns,
-        vec![
-            Some("ForgeResult".to_owned()),
-            Some("ForgeResult".to_owned())
-        ],
-        "a fallible operation that may yield an `Artifact` is not a value of \
-         that type, and the reader must not pretend otherwise"
+        read.iter()
+            .filter(|function| function.returns.as_deref() == Some("Evidence"))
+            .map(|function| function.name.clone())
+            .collect::<Vec<_>>(),
+        ["evidence_from_check_run"],
+        "`Result<Evidence, _>` produces an `Evidence`"
+    );
+    assert!(
+        !is_sanctioned(&read[0], "Evidence"),
+        "and nothing about being fallible sanctions it"
+    );
+}
+
+#[test]
+fn only_the_forge_read_trait_may_download_an_artifact() {
+    // The one function that legitimately returns an `Artifact` behind a
+    // `Result`, and the reason the sanction is written against the trait rather
+    // than against the name: an inherent `download` on some other type is not
+    // `ForgeRead::download` and must not inherit its exemption.
+    let sample = common::read(
+        "sample",
+        r"
+        trait ForgeRead {
+            async fn download(&self, meta: &ArtifactMeta) -> ForgeResult<Artifact>;
+        }
+        impl ForgeRead for NullForge {
+            async fn download(&self, _meta: &ArtifactMeta) -> ForgeResult<Artifact> {
+                unimplemented!()
+            }
+        }
+        impl Cache {
+            pub fn download(&self) -> ForgeResult<Artifact> {
+                unimplemented!()
+            }
+        }
+        ",
+    );
+    let read = common::functions(sample.items());
+
+    assert_eq!(
+        read.iter()
+            .filter(|function| function.returns.as_deref() == Some("Artifact"))
+            .count(),
+        3,
+        "all three produce an `Artifact` once the `Result` is seen through"
+    );
+    assert!(is_sanctioned(&read[0], "Artifact"), "the declaration");
+    assert!(
+        is_sanctioned(&read[1], "Artifact"),
+        "and its implementation"
+    );
+    assert!(
+        !is_sanctioned(&read[2], "Artifact"),
+        "but an inherent `Cache::download` is not `ForgeRead::download`"
     );
 }
 
@@ -368,7 +433,7 @@ fn the_reader_covers_more_than_the_top_level_of_a_file() {
     // against, and a reader that only looked at a file's top-level items would
     // miss it — while a `#[cfg(test)]` module is not linked, and must be skipped
     // however deep it sits.
-    let sample = common::parse(
+    let sample = common::read(
         "sample",
         r"
         mod inner {
@@ -380,11 +445,111 @@ fn the_reader_covers_more_than_the_top_level_of_a_file() {
         }
         ",
     );
-    let items = common::items(&sample);
+    let items = sample.items();
 
     assert_eq!(
-        common::conversions(&items).len(),
+        common::conversions(items).len(),
         1,
         "the one in `inner`, and not the fixture in `tests`"
+    );
+}
+
+#[test]
+fn a_cfg_not_test_item_is_read_and_a_cfg_test_item_is_not() {
+    // The blind spot a naive "does the `cfg` mention `test`" check had. The
+    // negation ships in every build anyone links against, and skipping it
+    // hid a whole `impl` from every guard in this file.
+    let sample = common::read(
+        "sample",
+        r#"
+        #[cfg(not(test))]
+        impl From<CheckRun> for Evidence {}
+        #[cfg(test)]
+        impl From<CheckRun> for Artifact {}
+        #[cfg(all(test, feature = "e2e"))]
+        impl From<CheckRun> for Adoption {}
+        #[cfg(feature = "e2e")]
+        impl From<CheckRun> for Coverage {}
+        #[cfg(any(test, unix))]
+        impl From<CheckRun> for Report {}
+        "#,
+    );
+    let targets: Vec<String> = common::conversions(sample.items())
+        .into_iter()
+        .map(|conversion| conversion.target)
+        .collect();
+
+    assert_eq!(
+        targets,
+        ["Evidence", "Coverage", "Report"],
+        "`not(test)` ships, `test` and `all(test, …)` do not, and a predicate \
+         this reader cannot evaluate is assumed to ship rather than assumed \
+         away"
+    );
+}
+
+#[test]
+fn an_impl_inside_a_const_block_is_still_registered() {
+    // `const _: () = { … };` is the idiom for a scoped impl. The compiler
+    // registers it globally; a walk that only descended into modules never saw
+    // it. The `fn` form is here too, even though rustc's
+    // `non_local_definitions` lint discourages it — a lint is not a guard.
+    let sample = common::read(
+        "sample",
+        r"
+        const _: () = {
+            impl From<CheckRun> for Evidence {}
+        };
+        static _WIRE: () = {
+            impl From<WorkflowRun> for Evidence {}
+        };
+        fn wire_up() {
+            impl From<CheckRequest> for Evidence {}
+        }
+        ",
+    );
+    let sources: Vec<String> = common::conversions(sample.items())
+        .into_iter()
+        .map(|conversion| conversion.source)
+        .collect();
+
+    assert_eq!(
+        sources,
+        ["CheckRun", "WorkflowRun", "CheckRequest"],
+        "an item body is a place items live, not only a place expressions do"
+    );
+}
+
+#[test]
+fn an_impl_written_inside_a_macro_is_read() {
+    // `syn` hands a `macro_rules!` body back as opaque tokens, so a naive parse
+    // is a *regression* here: the text scan this file replaced could see the
+    // impl, because the impl is written in the source even though it is not
+    // an item yet. One `impl From<$name> for Evidence` in a macro invoked
+    // eleven times is eleven forbidden impls.
+    let sample = common::read(
+        "sample",
+        r"
+        macro_rules! id_newtype {
+            ($(#[$meta:meta])* $name:ident) => {
+                $(#[$meta])*
+                pub struct $name(SmolStr);
+
+                impl From<$name> for Evidence {
+                    fn from(_value: $name) -> Self {
+                        unimplemented!()
+                    }
+                }
+            };
+        }
+        ",
+    );
+    let found = common::conversions(sample.items());
+
+    assert_eq!(found.len(), 1, "the impl inside the macro body");
+    assert_eq!(found[0].target, "Evidence");
+    assert_eq!(
+        found[0].source, "metavar_name",
+        "the metavariable stands in for every type the macro is invoked for"
     );
 }
