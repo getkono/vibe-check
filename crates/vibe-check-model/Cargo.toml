@@ -23,6 +23,8 @@ thiserror  = { workspace = true }
 
 [dev-dependencies]
 proptest = { workspace = true }
+# For the structural guards in `tests/`, which parse this workspace's sources.
+syn      = { workspace = true }
 
 [lints]
 workspace = true

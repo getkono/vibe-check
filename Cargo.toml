@@ -111,6 +111,23 @@ blake3   = "1.8.6"
 clap = { version = "4.6.6", features = ["derive", "env"] }
 
 # --- dev --------------------------------------------------------------------
+# The structural guard tests parse the workspace's own sources rather than
+# scanning them for substrings. A guard that matches text is bypassed by
+# rewording — `impl TryFrom<CheckRun> for Evidence` slips past a scan for
+# `From`, and a consuming builder `fn with_tier(mut self) -> Self` slips past a
+# scan for `&mut self` — so the guards read the same syntax tree the compiler
+# does. Dev-only, and only in `vibe-check-model`, where those guards live.
+#
+# `default-features = false` drops `proc-macro`: these are ordinary test
+# binaries, not macros, and they have no business linking the proc-macro bridge.
+# `full` and `visit` are what make `parse_file` and the `Visit` walk available.
+syn = { version = "2.0.119", default-features = false, features = [
+  "parsing",
+  "full",
+  "visit",
+  "clone-impls",
+  "printing",
+] }
 proptest = "1.11.0"
 insta    = { version = "1.48.0", features = ["json", "redactions"] }
 tempfile = "3.27.0"

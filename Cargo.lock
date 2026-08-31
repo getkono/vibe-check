@@ -2312,6 +2312,7 @@ dependencies = [
  "serde",
  "serde_json",
  "smol_str",
+ "syn 2.0.119",
  "thiserror",
 ]
 

@@ -20,29 +20,63 @@
 //! An absence is invisible. Nothing fails when someone adds the missing
 //! conversion; the type checker is *happier* afterwards, the diff looks like a
 //! small ergonomic improvement, and every adopted capability quietly starts
-//! trusting a green tick. So the absence is asserted here, against the source
-//! text of every crate, the same way `accumulator_invariants` asserts the
+//! trusting a green tick. So the absence is asserted here, against the parsed
+//! source of every crate, the same way `accumulator_invariants` asserts the
 //! properties of the adjudicator that are likewise not expressible as types.
 //!
 //! This test lives in `vibe-check-model` because that is where `Evidence`'s
-//! constructor monopoly is defined, but it deliberately scans the whole
+//! constructor monopoly is defined, but it deliberately reads the whole
 //! workspace: the impl it is looking for would most naturally be written in
 //! whichever crate learns about check runs, which is not this one.
+//!
+//! # Why `From` was never the rule
+//!
+//! The prohibition used to be spelled as a search for the eleven characters
+//! `impl From<`, and every near-miss passed:
+//!
+//! ```ignore
+//! impl TryFrom<CheckRun> for Evidence   // a different trait
+//! impl Into<Evidence> for CheckRun      // the same conversion, reversed
+//! impl From<CheckRun> for &Evidence     // a target the scan read as empty
+//! fn evidence_from_check_run(…) -> Evidence  // no trait at all
+//! ```
+//!
+//! Each of those is what someone writes when the obvious spelling does not
+//! compile, so the guard asks the syntax tree instead. `From`, `TryFrom` and
+//! `Into` are normalized into one direction; `&T`, `Box<T>`, `Option<T>` and
+//! `Vec<T>` are reduced to the type they carry; and the rule the file always
+//! *meant* — that nothing but the two sanctioned constructors produces an
+//! `Evidence` or an `Artifact` — is finally stated outright.
+//!
+//! Types are matched by exact base identifier, never by substring. An
+//! `EvidenceBundle` is not an `Evidence`, and a guard that could not tell them
+//! apart would fail on a legitimate function that had never gone near a check
+//! run.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
-use camino::{Utf8Path, Utf8PathBuf};
+mod common;
 
-/// Types that must never appear as the target of a `From` impl.
+use common::Conversion;
+
+/// Types that must never be produced except by their sanctioned constructor.
 ///
 /// `Evidence` because it may only be built by `Evidence::from_parsed`, which
 /// takes a `ParsedEvidence`, which can only come from a parse that succeeded.
-/// `Artifact` because it may only be built from bytes that were actually
-/// downloaded and hashed. A `From` impl targeting either is a second
-/// constructor, and a second constructor is the whole hole.
+/// `Artifact` because it may only be built by `Artifact::new`, from bytes that
+/// were actually downloaded and hashed. A second producer — a `From` impl, or
+/// a free function — is a second constructor, and a second constructor is the
+/// whole hole.
 const FORBIDDEN_TARGETS: [&str; 2] = ["Evidence", "Artifact"];
 
-/// Types that must never appear as the *source* of a `From` impl.
+/// The one function allowed to produce each forbidden target.
+///
+/// Written as `(type, function)` pairs rather than as bare names so that a new
+/// `Evidence::new` is a failure rather than a coincidence of naming.
+const SANCTIONED_CONSTRUCTORS: [(&str, &str); 2] =
+    [("Evidence", "from_parsed"), ("Artifact", "new")];
+
+/// Types that must never appear as the *source* of a conversion.
 ///
 /// Listed separately from the targets because the danger is not symmetric: a
 /// conversion *out of* a check run is suspect wherever it lands, since the only
@@ -63,208 +97,24 @@ const FORBIDDEN_SOURCES: [&str; 5] = [
     "RunStatus",
 ];
 
-/// One `impl From<Source> for Target` found in the source text.
-#[derive(PartialEq, Eq, Debug)]
-struct FromImpl {
-    source: String,
-    target: String,
-}
-
-/// Drop comment lines.
-///
-/// Required, not cosmetic: the two doc comments quoted at the top of this file
-/// both spell out the exact impl they forbid, so a scanner over raw text would
-/// report the sentences explaining the rule as violations of it.
-///
-/// Line comments only, matching `accumulator_invariants`. The workspace uses no
-/// block comments, and `clippy.toml` plus review are what keep it that way.
-fn code_only(source: &str) -> String {
-    source
-        .lines()
-        .filter(|line| !line.trim_start().starts_with("//"))
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
-/// Collapse whitespace, so an impl rustfmt wrapped across lines reads as one.
-fn normalized(source: &str) -> String {
-    source.split_whitespace().collect::<Vec<_>>().join(" ")
-}
-
-/// Whether `From<` at `at` is the trait of an `impl`, rather than a bound.
-///
-/// `where T: From<u8>` and `impl From<u8> for T` both contain `From<`, and only
-/// the second declares a conversion. Accepts both `impl From<` and the
-/// generic `impl<T> From<` forms.
-fn is_impl_position(code: &str, at: usize) -> bool {
-    let before = code[..at].trim_end();
-    if before.ends_with("impl") {
-        return true;
-    }
-    // `impl<T> From<…>`: step back over the generic parameter list.
-    let Some(without_close) = before.strip_suffix('>') else {
-        return false;
-    };
-    let mut depth = 1usize;
-    for (index, character) in without_close.char_indices().rev() {
-        match character {
-            '>' => depth += 1,
-            '<' => {
-                depth -= 1;
-                if depth == 0 {
-                    return without_close[..index].trim_end().ends_with("impl");
-                }
-            }
-            _ => {}
-        }
-    }
-    false
-}
-
-/// The end of the angle-bracketed argument beginning at `open`.
-fn matching_angle(code: &str, open: usize) -> Option<usize> {
-    let mut depth = 0usize;
-    for (index, character) in code[open..].char_indices() {
-        match character {
-            '<' => depth += 1,
-            '>' => {
-                depth -= 1;
-                if depth == 0 {
-                    return Some(open + index);
-                }
-            }
-            _ => {}
-        }
-    }
-    None
-}
-
-/// Every `impl From<_> for _` in a source file.
-fn from_impls(source: &str) -> Vec<FromImpl> {
-    let code = normalized(&code_only(source));
+/// Every conversion in the workspace's library sources, with its file.
+fn workspace_conversions() -> Vec<(String, Conversion)> {
     let mut found = Vec::new();
-    let mut cursor = 0usize;
-
-    while let Some(offset) = code[cursor..].find("From<") {
-        let start = cursor + offset;
-        cursor = start + "From<".len();
-
-        if !is_impl_position(&code, start) {
-            continue;
+    for (path, file) in common::workspace_sources() {
+        for conversion in common::conversions(&common::items(&file)) {
+            found.push((path.to_string(), conversion));
         }
-        let open = start + "From".len();
-        let Some(close) = matching_angle(&code, open) else {
-            continue;
-        };
-        let Some(rest) = code[close + 1..].strip_prefix(" for ") else {
-            continue;
-        };
-
-        // The target runs to the first token that cannot be part of a path.
-        let target: String = rest
-            .chars()
-            .take_while(|c| c.is_alphanumeric() || *c == '_' || *c == ':' || *c == '$')
-            .collect();
-
-        found.push(FromImpl {
-            source: code[open + 1..close].trim().to_owned(),
-            target,
-        });
     }
-
     found
-}
-
-/// Every `.rs` file under `crates/*/src`, in a stable order.
-fn workspace_sources() -> Vec<(Utf8PathBuf, String)> {
-    let root = Utf8Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(Utf8Path::parent)
-        .expect("the model crate sits two levels below the workspace root")
-        .to_owned();
-
-    // Library sources only. An impl written in a `tests/` directory exists in a
-    // test binary and not in the crate anyone links against — and this file's own
-    // samples, which spell out the forbidden impl in order to prove the scanner
-    // sees it, would otherwise report themselves.
-    let mut crate_dirs = Vec::new();
-    collect_dirs(&root.join("crates"), &mut crate_dirs);
-    crate_dirs.sort();
-
-    let mut files = Vec::new();
-    for crate_dir in &crate_dirs {
-        collect_rs(&crate_dir.join("src"), &mut files);
-    }
-    files.sort();
-
-    assert!(
-        crate_dirs.len() >= 3 && files.len() > 10,
-        "expected the workspace crates under {root}, found {} crates and {} source \
-         files — if the layout moved, this test is scanning nothing and proving \
-         nothing",
-        crate_dirs.len(),
-        files.len()
-    );
-
-    files
-        .into_iter()
-        .map(|path| {
-            let text = std::fs::read_to_string(&path).expect("a listed source file is readable");
-            (path, text)
-        })
-        .collect()
-}
-
-/// The immediate subdirectories of `dir`, i.e. the workspace's crates.
-fn collect_dirs(dir: &Utf8Path, out: &mut Vec<Utf8PathBuf>) {
-    let Ok(entries) = dir.read_dir_utf8() else {
-        return;
-    };
-    for entry in entries.flatten() {
-        if entry.path().is_dir() {
-            out.push(entry.path().to_owned());
-        }
-    }
-}
-
-/// Recursively collect `.rs` paths under `dir`.
-///
-/// Via camino, so a source file whose path is not UTF-8 is skipped loudly by
-/// the walk rather than lossily renamed — the same reason the workspace bans
-/// `std::path` outright.
-///
-/// Directory order is filesystem-dependent, which is why `read_dir` is
-/// disallowed elsewhere. It does not reach a verdict from here, but the caller
-/// sorts anyway so that a failure names files in the same order on every
-/// machine.
-fn collect_rs(dir: &Utf8Path, out: &mut Vec<Utf8PathBuf>) {
-    let Ok(entries) = dir.read_dir_utf8() else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.is_dir() {
-            collect_rs(path, out);
-        } else if path.extension() == Some("rs") {
-            out.push(path.to_owned());
-        }
-    }
 }
 
 #[test]
 fn nothing_converts_into_evidence_or_an_artifact() {
-    let mut offenders = Vec::new();
-
-    for (path, source) in workspace_sources() {
-        for found in from_impls(&source) {
-            if FORBIDDEN_TARGETS.contains(&found.target.as_str()) {
-                offenders.push(format!(
-                    "{}: impl From<{}> for {}",
-                    path, found.source, found.target
-                ));
-            }
-        }
-    }
+    let offenders: Vec<String> = workspace_conversions()
+        .into_iter()
+        .filter(|(_, conversion)| FORBIDDEN_TARGETS.contains(&conversion.target.as_str()))
+        .map(|(path, conversion)| format!("{path}: {}", conversion.rendered()))
+        .collect();
 
     assert!(
         offenders.is_empty(),
@@ -273,9 +123,11 @@ fn nothing_converts_into_evidence_or_an_artifact() {
          `Evidence` has exactly one constructor, `from_parsed`, which takes a \
          `ParsedEvidence` that can only come from a parse that succeeded. \
          `Artifact` has exactly one constructor, which takes the bytes that were \
-         actually downloaded. A `From` impl is a second constructor, and a second \
+         actually downloaded. A conversion is a second constructor, and a second \
          constructor is a path by which something that was never measured becomes \
-         indistinguishable from something that was.\n\
+         indistinguishable from something that was. `TryFrom` and `Into` are the \
+         same conversion under other names, and `&Evidence` is the same type \
+         behind a reference.\n\
          \n\
          If you need to record that a capability could not be answered, that is \
          what `UnverifiedReason` is for — and it is the only thing a failure is \
@@ -286,21 +138,11 @@ fn nothing_converts_into_evidence_or_an_artifact() {
 
 #[test]
 fn nothing_converts_out_of_a_check_run() {
-    let mut offenders = Vec::new();
-
-    for (path, source) in workspace_sources() {
-        for found in from_impls(&source) {
-            if FORBIDDEN_SOURCES
-                .iter()
-                .any(|forbidden| found.source.contains(forbidden))
-            {
-                offenders.push(format!(
-                    "{}: impl From<{}> for {}",
-                    path, found.source, found.target
-                ));
-            }
-        }
-    }
+    let offenders: Vec<String> = workspace_conversions()
+        .into_iter()
+        .filter(|(_, conversion)| FORBIDDEN_SOURCES.contains(&conversion.source.as_str()))
+        .map(|(path, conversion)| format!("{path}: {}", conversion.rendered()))
+        .collect();
 
     assert!(
         offenders.is_empty(),
@@ -319,46 +161,230 @@ fn nothing_converts_out_of_a_check_run() {
 }
 
 #[test]
-fn the_scanner_actually_finds_impls() {
-    // These guarantees are only as good as the parsing above, and a scanner that
-    // silently matched nothing would pass both tests here forever.
-    let sample = r"
+fn nothing_but_the_sanctioned_constructor_produces_one() {
+    // The rule the two tests above were always a proxy for. `From` was only ever
+    // the most *likely* spelling of the violation; a plain
+    //
+    //     fn evidence_from_check_run(run: &CheckRun) -> Evidence
+    //
+    // is the identical laundering with no trait involved, and no scan for `impl
+    // From<` would ever have seen it.
+    //
+    // `Result<_, _>` and `ForgeResult<_>` are deliberately *not* unwrapped when
+    // a return type is reduced to its base identifier. "A fallible operation
+    // that may yield one" is a different claim from "a value of this type", and
+    // unwrapping them would make `Forge::download` — whose entire job is to
+    // produce an `Artifact` from bytes it just downloaded and hashed — report
+    // itself.
+    let mut offenders = Vec::new();
+
+    for (path, file) in common::workspace_sources() {
+        for function in common::functions(&common::items(&file)) {
+            let Some(produced) = function.returns.as_deref() else {
+                continue;
+            };
+            if !FORBIDDEN_TARGETS.contains(&produced) {
+                continue;
+            }
+            let sanctioned = SANCTIONED_CONSTRUCTORS.contains(&(produced, function.name.as_str()))
+                && function.owner.as_deref() == Some(produced);
+            if !sanctioned {
+                offenders.push(format!("{path}: fn {} -> {produced}", function.path()));
+            }
+        }
+    }
+
+    assert!(
+        offenders.is_empty(),
+        "only `Evidence::from_parsed` and `Artifact::new` may produce one:\n{}\n\
+         \n\
+         Both constructors take the thing that makes the value honest — a \
+         `ParsedEvidence` that could only come from a parse that succeeded, and \
+         the bytes that were actually downloaded. Any other function returning \
+         one is a place where that argument is not made, whether or not it wears \
+         a trait's name.",
+        offenders.join("\n")
+    );
+}
+
+// --- anti-vacuity ----------------------------------------------------------
+//
+// The guarantees above are only as good as the reader beneath them, and a
+// reader that silently matched nothing would pass all three forever. One
+// meta-test per rule, each planting the violation that rule exists to catch.
+
+#[test]
+fn the_reader_normalizes_every_spelling_of_the_impl_that_matters() {
+    // The four bypasses the text scanner had, planted together. Each must come
+    // back as the same conversion: out of a check run, into evidence.
+    let sample = common::parse(
+        "sample",
+        r"
         /// There is no `impl From<CheckRun> for Evidence` anywhere.
-        impl From<ParseError> for UnverifiedReason {}
-        impl<T: Debug> From<Vec<T>>
-            for EvidenceFacts
+        impl TryFrom<CheckRun> for Evidence {}
+        impl Into<Evidence> for CheckRun {}
+        impl From<CheckRun> for &Evidence {}
+        impl<T: Debug> From<Vec<CheckRun>>
+            for Box<Evidence>
         {}
         fn generic<T>(value: T) where T: From<u8> {}
-    ";
-
-    let found = from_impls(sample);
+        ",
+    );
+    let items = common::items(&sample);
+    let found = common::conversions(&items);
 
     assert_eq!(
         found,
         vec![
-            FromImpl {
-                source: "ParseError".to_owned(),
-                target: "UnverifiedReason".to_owned(),
+            Conversion {
+                via: "TryFrom".to_owned(),
+                source: "CheckRun".to_owned(),
+                target: "Evidence".to_owned(),
             },
-            FromImpl {
-                source: "Vec<T>".to_owned(),
-                target: "EvidenceFacts".to_owned(),
+            Conversion {
+                via: "Into".to_owned(),
+                source: "CheckRun".to_owned(),
+                target: "Evidence".to_owned(),
+            },
+            Conversion {
+                via: "From".to_owned(),
+                source: "CheckRun".to_owned(),
+                target: "Evidence".to_owned(),
+            },
+            Conversion {
+                via: "From".to_owned(),
+                source: "CheckRun".to_owned(),
+                target: "Evidence".to_owned(),
             },
         ],
-        "the scanner must see through rustfmt line wrapping and generic \
-         parameters, must ignore a `From` bound in a `where` clause, and must \
-         ignore the doc comment naming the very impl it forbids"
+        "a different trait, a reversed direction, a reference target and a \
+         wrapped pair are all the same conversion — and a `From` bound in a \
+         `where` clause is not a conversion at all"
+    );
+
+    for conversion in &found {
+        assert!(FORBIDDEN_TARGETS.contains(&conversion.target.as_str()));
+        assert!(FORBIDDEN_SOURCES.contains(&conversion.source.as_str()));
+    }
+}
+
+#[test]
+fn the_reader_does_not_confuse_an_evidence_bundle_for_evidence() {
+    // Exact base identifiers, never substrings. `EvidenceBundle` is a legitimate
+    // public type and a conversion into one says nothing about check runs; a
+    // guard that matched `Evidence` as a substring would fail on it, which is
+    // the false positive that makes people delete guards.
+    let sample = common::parse(
+        "sample",
+        r"
+        impl From<Parts> for EvidenceBundle {}
+        impl From<Parts> for EvidenceFacts {}
+        fn assemble(parts: Parts) -> EvidenceBundle { EvidenceBundle {} }
+        ",
+    );
+    let items = common::items(&sample);
+
+    assert!(
+        common::conversions(&items)
+            .iter()
+            .all(|conversion| !FORBIDDEN_TARGETS.contains(&conversion.target.as_str())),
+        "`EvidenceBundle` and `EvidenceFacts` are not `Evidence`"
+    );
+    assert!(
+        common::functions(&items)
+            .iter()
+            .all(|function| function.returns.as_deref() != Some("Evidence")),
+        "and neither is a function that returns one"
     );
 }
 
 #[test]
-fn the_scanner_would_catch_the_impl_that_matters() {
-    // The specific change this file exists to prevent, run through the scanner
-    // to prove the assertion above is reachable rather than vacuous.
-    let sample = "impl From<CheckRun> for Evidence {}";
-    let found = from_impls(sample);
+fn the_reader_sees_a_free_function_that_launders_a_check_run() {
+    // No trait, no impl, and every text scan in the tree's history blind to it.
+    let sample = common::parse(
+        "sample",
+        r"
+        fn evidence_from_check_run(run: &CheckRun) -> Evidence { todo!() }
+        impl Adoption {
+            pub fn artifact_for(&self, run: &WorkflowRun) -> Option<Artifact> { None }
+        }
+        ",
+    );
+    let items = common::items(&sample);
+    let producers: Vec<String> = common::functions(&items)
+        .into_iter()
+        .filter(|function| {
+            function
+                .returns
+                .as_deref()
+                .is_some_and(|name| FORBIDDEN_TARGETS.contains(&name))
+        })
+        .map(|function| function.path())
+        .collect();
 
-    assert_eq!(found.len(), 1, "the scanner sees the forbidden impl");
-    assert!(FORBIDDEN_TARGETS.contains(&found[0].target.as_str()));
-    assert!(FORBIDDEN_SOURCES.contains(&found[0].source.as_str()));
+    assert_eq!(
+        producers,
+        ["evidence_from_check_run", "Adoption::artifact_for"],
+        "a free function and a method behind an `Option` both produce one, and \
+         neither is `Evidence::from_parsed` or `Artifact::new`"
+    );
+}
+
+#[test]
+fn a_fallible_download_is_not_a_second_constructor() {
+    // The rule above must not fire on `Forge::download`, which is the *only*
+    // honest way an `Artifact` comes into existence: it downloads the bytes and
+    // hashes them, then calls `Artifact::new`. A guard that unwrapped `Result`
+    // would flag the sanctioned path and would be deleted rather than obeyed.
+    let sample = common::parse(
+        "sample",
+        r"
+        trait Forge {
+            async fn download(&self, meta: &ArtifactMeta) -> ForgeResult<Artifact>;
+            async fn artifacts(&self, run: &WorkflowRun) -> ForgeResult<Vec<ArtifactMeta>>;
+        }
+        ",
+    );
+    let items = common::items(&sample);
+    let returns: Vec<Option<String>> = common::functions(&items)
+        .into_iter()
+        .map(|function| function.returns)
+        .collect();
+
+    assert_eq!(
+        returns,
+        vec![
+            Some("ForgeResult".to_owned()),
+            Some("ForgeResult".to_owned())
+        ],
+        "a fallible operation that may yield an `Artifact` is not a value of \
+         that type, and the reader must not pretend otherwise"
+    );
+}
+
+#[test]
+fn the_reader_covers_more_than_the_top_level_of_a_file() {
+    // A conversion written inside an inline module is in the crate anyone links
+    // against, and a reader that only looked at a file's top-level items would
+    // miss it — while a `#[cfg(test)]` module is not linked, and must be skipped
+    // however deep it sits.
+    let sample = common::parse(
+        "sample",
+        r"
+        mod inner {
+            impl From<CheckRun> for Evidence {}
+        }
+        #[cfg(test)]
+        mod tests {
+            impl From<CheckRun> for Evidence {}
+        }
+        ",
+    );
+    let items = common::items(&sample);
+
+    assert_eq!(
+        common::conversions(&items).len(),
+        1,
+        "the one in `inner`, and not the fixture in `tests`"
+    );
 }
