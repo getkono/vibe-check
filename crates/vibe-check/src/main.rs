@@ -6,7 +6,7 @@
 
 use clap::Parser;
 use eyre::Result;
-use vibe_check::{Cli, exit};
+use vibe_check::{Cli, panic};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -20,15 +20,12 @@ async fn main() -> Result<()> {
                 .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn")),
         )
         .init();
+    // After `color_eyre::install`, which installs a hook of its own and would
+    // otherwise replace this one.
+    panic::install();
 
-    match vibe_check::run(Cli::parse()).await {
-        Ok(code) => std::process::exit(i32::from(code)),
-        Err(report) => {
-            // Report the failure, then exit with the reserved failure code.
-            // Never 0, and never a verdict code: "we could not tell" is not a
-            // verdict, and a pipeline must be able to tell the difference.
-            eprintln!("{report:?}");
-            std::process::exit(i32::from(exit::FAILURE));
-        }
-    }
+    // Every outcome, including a panic, comes back as an exit code from the
+    // documented table. Argument parsing stays outside: clap exits `2` on a bad
+    // command line itself, which is the one code this binary does not choose.
+    std::process::exit(i32::from(panic::run_guarded(Cli::parse()).await));
 }

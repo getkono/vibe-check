@@ -8,7 +8,7 @@
 
 use clap::Parser;
 use eyre::Result;
-use vibe_check::{Cli, exit};
+use vibe_check::{Cli, panic};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -20,15 +20,11 @@ async fn main() -> Result<()> {
                 .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn")),
         )
         .init();
+    // After `color_eyre::install`, for the reason given in `main.rs`.
+    panic::install();
 
     let cli = Cli::parse_from(strip_cargo_subcommand(std::env::args()));
-    match vibe_check::run(cli).await {
-        Ok(code) => std::process::exit(i32::from(code)),
-        Err(report) => {
-            eprintln!("{report:?}");
-            std::process::exit(i32::from(exit::FAILURE));
-        }
-    }
+    std::process::exit(i32::from(panic::run_guarded(cli).await));
 }
 
 /// Drop the `vibe-check` cargo inserts as `argv[1]`.
