@@ -17,13 +17,17 @@ disagree, the module doc wins and this file is the bug.
 
 User-facing framing — what vibe-check is for, how to adopt it, how to install
 it, what the exit codes mean to a caller — is `README.md`'s job and is
-deliberately absent here.
+deliberately absent here. That split is a contract about ownership, not a
+description of what is written today: `README.md` is currently three lines and
+carries none of it. #14 is the issue that fills it in.
 
 Where an invariant is enforced by a **test** rather than by a type, this file
 says so. That distinction is load-bearing: it tells you whether the compiler
 will stop you or whether only `mise run test` will. Where nothing enforces an
 invariant yet, this file says "not yet enforced" and names where enforcement
-will land. Three such gaps exist today and are listed as gaps, not as promises.
+will land. Three such gaps exist today — §5 and §6 — and are listed as gaps,
+not as promises. The unwritten `README.md` above is a fourth, of a different
+kind: a documentation gap rather than an unenforced invariant.
 
 ## 1. The workspace
 
@@ -84,8 +88,9 @@ Enforced by a **test that reads the source text**, because "no submodules" and
 "one mutator" are not expressible as types:
 `crates/vibe-check-model/tests/accumulator_invariants.rs`. It also asserts the
 absence of `set_tier`, `tier_mut`, `DerefMut`, `impl AsMut`, and
-`impl Default for Adjudicator`. Adding a submodule under either file is a build
-failure, not a review comment.
+`impl Default for Adjudicator`. Adding a submodule under either file is a test
+failure, not a review comment: `cargo build` succeeds, and `mise run test` is
+what stops you.
 
 ## 3. The four capability states
 
@@ -303,7 +308,7 @@ Standing rules:
   code too, and says why in its own docs.
 - The exit-code contract lives in `crates/vibe-check/src/exit.rs`, next to the
   tier it derives from. Do not restate the table anywhere else — `README.md`
-  owns the user-facing version.
+  owns the user-facing version, and does not carry it yet (#14).
 
 Tests run hermetically and without network access, because they run on the
 pre-push hook. Anything slow or networked belongs behind an `e2e` feature.
@@ -315,11 +320,14 @@ matters here:
 
 - **`tokio`** — the async runtime. `#[tokio::main]` on both binaries and
   `JoinSet` in `LocalScheduler`; features `rt-multi-thread`, `macros`,
-  `process`, `time`, `sync` (`crates/vibe-check/Cargo.toml`), of which `process`
-  and `time` are declared and not yet exercised. **There is no HTTP client in
-  this workspace** — no `reqwest`, no `octocrab`, no `hyper`. The forge traits
-  are declared in `vibe-check-host` and have no implementation yet beyond
-  `NullForge`.
+  `process`, `time`, `sync` (`crates/vibe-check/Cargo.toml`), of which
+  `process`, `time`, and `sync` are all declared and not yet exercised. **There
+  is no HTTP client in this workspace** — no `reqwest`, no `octocrab`, no
+  `hyper`, so the forge traits have no network-backed implementation. The two
+  that exist are `NullForge` (`crates/vibe-check-host/src/forge.rs`), which
+  refuses every read, and `FakeForge`
+  (`crates/vibe-check-testkit/src/forge.rs`), the workspace's only `ForgeWrite`
+  implementation. Test against `FakeForge` rather than writing a second fake.
 - **`tracing`** and **`tracing-subscriber`** — structured diagnostics.
 - **`eyre`** and **`color-eyre`** — application error propagation and readable
   failure reports. Library crates use `thiserror` for typed errors instead.
