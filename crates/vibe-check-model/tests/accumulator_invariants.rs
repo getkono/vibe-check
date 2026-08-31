@@ -11,6 +11,9 @@
 //! 4. `Adjudicators::route` is not `pub`, so the advisory ledger is not
 //!    nameable from outside this crate.
 //! 5. `AdvisoryAdjudication` yields no verdict.
+//! 6. `CapabilityResolution::account` is not `pub`, so accounting a set of
+//!    resolutions in an order of the caller's choosing is not expressible from
+//!    outside the crate.
 //!
 //! The second one is easy to miss in review. Rust's field privacy is
 //! module-scoped, so a private field is reachable from every descendant module —
@@ -39,6 +42,7 @@
 const ACCUMULATOR: &str = include_str!("../src/adjudicate/accumulator.rs");
 const ENFORCEMENT: &str = include_str!("../src/adjudicate/enforcement.rs");
 const KNOWN: &str = include_str!("../src/known.rs");
+const RESOLUTION: &str = include_str!("../src/resolution.rs");
 
 /// Everything before `#[cfg(test)]`, so a module's own tests do not count.
 fn non_test_source(source: &str) -> &str {
@@ -260,6 +264,16 @@ fn enforcement_code() -> String {
     without_test_modules(&code_only(ENFORCEMENT))
 }
 
+/// `resolution.rs`, prepared the same way.
+///
+/// The excising regime rather than the truncating one, for the reason given
+/// above: `mod tests` is currently the last item in that file, but a second
+/// `pub fn account` written below it would be exactly the workaround this guard
+/// exists to catch, and truncation cannot see there.
+fn resolution_code() -> String {
+    without_test_modules(&code_only(RESOLUTION))
+}
+
 /// Module declarations in already-prepared code.
 fn module_declarations(code: &str) -> Vec<&str> {
     code.lines()
@@ -390,6 +404,41 @@ fn the_advisory_adjudication_yields_no_verdict() {
     assert!(
         blocks[0].contains("fn tier"),
         "sanity check: and it should be the one declaring `tier`"
+    );
+}
+
+#[test]
+fn accounting_is_not_public() {
+    // `CapabilityResolution::account` accounts *one* resolution. A caller that
+    // could reach it could account a whole set in whatever order its scheduler
+    // happened to produce, and both escalation ledgers are bundle fields — so
+    // that order would be part of what a verdict digest covers, and two runs of
+    // the same commit could disagree byte for byte.
+    //
+    // With it `pub(crate)`, the only way in from outside this crate is
+    // `Resolutions::account_into`, which walks a `BTreeMap` ascending by
+    // `RequirementId` and offers no second mode. Unordered accounting is not
+    // discouraged, it is unnameable.
+    //
+    // The trailing `(` in the needle is load-bearing. Without it the same needle
+    // matches `pub fn account_into(`, and the guard would fail on the very API
+    // it exists to protect — the third assertion below is what proves that
+    // claim rather than asserting it in a comment.
+    let source = resolution_code();
+    assert!(
+        !source.contains("pub fn account("),
+        "`CapabilityResolution::account` must stay `pub(crate)`; accounting in \
+         an order of the caller's choosing is what `Resolutions::account_into` \
+         exists to make inexpressible"
+    );
+    assert!(
+        source.contains("pub(crate) fn account("),
+        "sanity check: the method this test guards should exist"
+    );
+    assert!(
+        source.contains("pub fn account_into("),
+        "sanity check: the ordered entry point must be public — and a needle \
+         written without the trailing `(` would have matched this very line"
     );
 }
 
