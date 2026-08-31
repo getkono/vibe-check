@@ -11,7 +11,7 @@
 //!
 //! # Fail-closed lives here
 //!
-//! [`CapabilityResolution::account`] is the single consumer of a resolution, and
+//! `CapabilityResolution::account` is the single consumer of a resolution, and
 //! it is where the two rules that make the whole system safe are applied without
 //! exception:
 //!
@@ -24,6 +24,46 @@
 //! choosing between the enforced and advisory ledgers happens here rather than
 //! at call sites: it is one of the fail-closed rules, and it belongs next to the
 //! others.
+//!
+//! # Accounting happens in one order, always
+//!
+//! [`Resolutions`] is the accounting stage's input: a `BTreeMap` keyed by
+//! [`RequirementId`]. [`Resolutions::account_into`] walks it in ascending key
+//! order, unconditionally and with no second mode, so both escalation ledgers
+//! are a function of *which* requirements resolved and how — never of the order
+//! the engine happened to finish resolving them in.
+//!
+//! That matters because the ledgers are bundle fields. Capabilities resolve
+//! concurrently and completion order depends on how long each tool happened to
+//! take; a ledger accumulated in completion order would give two runs of the
+//! same commit two different serializations, and any digest covering the
+//! adjudication would disagree with itself. `LocalScheduler::dispatch` already
+//! sorts its leaf ids for exactly this reason; this is the same discipline one
+//! layer up.
+//!
+//! # The order goes on the input, not on the ledger
+//!
+//! Sorting a finished ledger would be a lie.
+//! [`Escalation::from`](crate::adjudicate::Escalation::from) records the tier
+//! *before* that escalation, which is a statement about the sequence: re-order
+//! the entries and `from` no longer agrees with the previous entry's `to`, and
+//! the ledger stops replaying to the tier it reports. Deriving `Ord` on
+//! [`Escalation`](crate::adjudicate::Escalation) would also force it onto
+//! [`EvidenceRef`], making that enum's variant declaration order a permanent
+//! semantic commitment inside a crate whose whole purpose is to be frozen.
+//!
+//! So the total order is imposed on the input, where [`RequirementId`] already
+//! supplies one — lexicographic bytes, alphabetical, deterministic, and nothing
+//! new to invent.
+//!
+//! That is also why `CapabilityResolution::account` is `pub(crate)` rather than
+//! `pub`: it accounts one resolution at a time, so a caller holding it could
+//! account a pile of them in any order it liked. Outside this crate the only
+//! way to account anything is [`Resolutions::account_into`], which has exactly
+//! one. Guarded by `accounting_is_not_public` in
+//! `tests/accumulator_invariants.rs`.
+
+use std::collections::BTreeMap;
 
 use jiff::civil::Date;
 use serde::{Deserialize, Serialize};
@@ -50,7 +90,7 @@ pub enum Judgement {
     ///
     /// A benchmark that did not converge, a coverage run with no data, a
     /// negation test whose added tests would not compile against the base
-    /// commit. Treated as unverified by [`CapabilityResolution::account`], so an
+    /// commit. Treated as unverified by `CapabilityResolution::account`, so an
     /// inconclusive result never reads as a pass.
     Inconclusive {
         /// Why no conclusion could be drawn.
@@ -223,8 +263,8 @@ impl UnverifiedReason {
     /// capability name would otherwise be a two-token gate disable: the
     /// requirement names something this build cannot evaluate, the failure to
     /// evaluate it lands in a ledger nothing enforces, and the gate is gone.
-    /// [`CapabilityResolution::account`] overrides the caller's
-    /// [`Enforcement`] to the enforcing lane whenever this is true.
+    /// `CapabilityResolution::account` overrides the caller's [`Enforcement`]
+    /// to the enforcing lane whenever this is true.
     ///
     /// An exhaustive `match` rather than a `matches!`, so that a new
     /// [`UnverifiedReason`] variant has to be classified by whoever adds it.
@@ -269,11 +309,23 @@ impl UnverifiedReason {
                 "artifact was produced from {produced_from} but the head is {expected}; \
                  re-run the producing workflow for this commit"
             ),
-            Self::GatesModified { paths } => format!(
-                "evidence comes from a workflow this change modifies ({}); \
-                 adopted results cannot be trusted here",
-                paths.join(", ")
-            ),
+            Self::GatesModified { paths } => {
+                // Sorted for the same reason accounting is ordered (#26). This
+                // sentence reaches a bundle field, and a set of modified gate
+                // paths collected by walking a diff arrives in whatever order
+                // the walk produced; two runs of the same commit would then
+                // write two different sentences. A local copy, so the variant's
+                // own field is untouched and this stays display-only — no
+                // contract change, and nothing downstream may read the order
+                // back out of the prose.
+                let mut paths = paths.clone();
+                paths.sort();
+                format!(
+                    "evidence comes from a workflow this change modifies ({}); \
+                     adopted results cannot be trusted here",
+                    paths.join(", ")
+                )
+            }
             Self::BudgetExceeded { cost, max } => {
                 format!("cost class `{cost}` exceeds the configured maximum `{max}`")
             }
@@ -410,7 +462,13 @@ impl CapabilityResolution {
     /// Note there is no path through this function in which an unanswered
     /// question leaves both tiers alone, and no path in which a fact about the
     /// policy reaches the advisory ledger.
-    pub fn account(
+    ///
+    /// `pub(crate)`, not `pub`. This accounts *one* resolution, so a caller that
+    /// could reach it could account a whole set in an order of its choosing —
+    /// and both ledgers are bundle fields. [`Resolutions::account_into`] is the
+    /// only way in from outside the crate, and it has exactly one order.
+    /// Guarded by `accounting_is_not_public`.
+    pub(crate) fn account(
         &self,
         requirement: &RequirementId,
         enforcement: Enforcement,
@@ -498,6 +556,106 @@ impl CapabilityResolution {
             }
             Self::Skipped { .. } | Self::Unverified { .. } => None,
         }
+    }
+}
+
+/// Every requirement's outcome, in the one order accounting may use.
+///
+/// A `BTreeMap` keyed by [`RequirementId`] rather than a `Vec` of pairs, and
+/// that choice is the whole of issue #26: with a `Vec`, "account these in the
+/// order they finished" is expressible, and the two escalation ledgers it
+/// produces are bundle fields. With a map there is no order to choose —
+/// [`account_into`](Self::account_into) walks the keys ascending and has no
+/// other mode.
+///
+/// It also gives [`RequirementId`] a second reason to be right: the identifier
+/// stops being a label carried alongside a resolution and becomes the key that
+/// decides where its escalation lands in the ledger.
+///
+/// # No `Serialize`
+///
+/// Deliberate. M3 owns the wire form of a resolution set, and a wire form
+/// invented before its consumer exists is a guess that a frozen crate then has
+/// to keep. The types inside are serializable; the container is not, yet.
+///
+/// # No `FromIterator`
+///
+/// `collect()` would silently swallow a duplicate [`RequirementId`], which is
+/// the one thing [`insert`](Self::insert) exists to make visible.
+#[derive(Clone, PartialEq, Eq, Debug, Default)]
+pub struct Resolutions(BTreeMap<RequirementId, (Enforcement, CapabilityResolution)>);
+
+impl Resolutions {
+    /// An empty set.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Record how one requirement resolved, returning whatever it displaced.
+    ///
+    /// The displaced value is returned rather than dropped so that a duplicate
+    /// [`RequirementId`] is *visible*. Two resolutions under one identifier is a
+    /// scope collision, and a silent last-wins would resolve it by dropping
+    /// whichever arrived first — which, if that was the failing one, is a
+    /// fail-open. The caller decides; this type refuses to decide quietly.
+    pub fn insert(
+        &mut self,
+        requirement: RequirementId,
+        enforcement: Enforcement,
+        resolution: CapabilityResolution,
+    ) -> Option<(Enforcement, CapabilityResolution)> {
+        self.0.insert(requirement, (enforcement, resolution))
+    }
+
+    /// Account every resolution, ascending by [`RequirementId`].
+    ///
+    /// **This is the fix for #26.** The iteration order is the map's, so it is
+    /// a property of the data rather than of the engine's scheduling, and two
+    /// runs over the same resolutions produce byte-identical ledgers.
+    ///
+    /// Both ledgers are fed by this one pass: `account` routes each resolution
+    /// to the enforcing or advisory lane *inside* the call, so each ledger is a
+    /// subsequence of one strictly increasing [`RequirementId`] sequence.
+    /// There is no second mechanism for the advisory ledger to fall out of step
+    /// with, because there is no second mechanism.
+    pub fn account_into(&self, adjudicators: &mut Adjudicators) {
+        for (requirement, (enforcement, resolution)) in &self.0 {
+            resolution.account(requirement, *enforcement, adjudicators);
+        }
+    }
+
+    /// The `(state, enforcement)` pairs
+    /// [`Confidence::tally`](crate::bundle::Confidence::tally) counts.
+    ///
+    /// Exposed here so that the ledger and the confidence sentence are built
+    /// from the same map. A tally assembled from a separate collection is a
+    /// tally that can disagree with the escalations printed beside it.
+    pub fn states(&self) -> impl Iterator<Item = (ResolutionState, Enforcement)> + '_ {
+        self.0
+            .values()
+            .map(|(enforcement, resolution)| (resolution.state(), *enforcement))
+    }
+
+    /// Every entry, ascending by [`RequirementId`].
+    pub fn iter(
+        &self,
+    ) -> impl Iterator<Item = (&RequirementId, Enforcement, &CapabilityResolution)> {
+        self.0
+            .iter()
+            .map(|(requirement, (enforcement, resolution))| (requirement, *enforcement, resolution))
+    }
+
+    /// How many requirements resolved.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    /// Whether no requirement resolved.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
     }
 }
 
@@ -804,6 +962,40 @@ mod tests {
             assert_eq!(enforced, Tier::BOTTOM);
             assert_eq!(advisory, Tier::TOP);
         }
+    }
+
+    #[test]
+    fn gate_paths_are_reported_in_a_stable_order() {
+        // #26 on the display side. These paths come from walking a diff, and
+        // this sentence ends up in a bundle field; two runs of the same commit
+        // must not write two different strings. Sorted on a local copy, so the
+        // variant's own field still holds exactly what the caller put in it —
+        // display-only, no contract change.
+        let unsorted = UnverifiedReason::GatesModified {
+            paths: vec![
+                ".github/workflows/release.yml".into(),
+                ".github/workflows/ci.yml".into(),
+            ],
+        };
+        let sorted = UnverifiedReason::GatesModified {
+            paths: vec![
+                ".github/workflows/ci.yml".into(),
+                ".github/workflows/release.yml".into(),
+            ],
+        };
+        assert_eq!(unsorted.detail(), sorted.detail());
+        assert!(
+            unsorted
+                .detail()
+                .contains(".github/workflows/ci.yml, .github/workflows/release.yml"),
+            "{}",
+            unsorted.detail()
+        );
+
+        let UnverifiedReason::GatesModified { paths } = &unsorted else {
+            panic!("constructed as `GatesModified`")
+        };
+        assert_eq!(paths[0], ".github/workflows/release.yml");
     }
 
     #[test]

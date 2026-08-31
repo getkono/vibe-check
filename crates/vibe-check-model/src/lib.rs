@@ -60,7 +60,7 @@ pub use known::{Known, UnknownKind};
 pub use location::{LineRange, Location};
 pub use reason::{EvidenceRef, PolicyRef, ReasonCode};
 pub use resolution::{
-    CapabilityResolution, Judgement, ResolutionState, SkipReason, UnverifiedReason,
+    CapabilityResolution, Judgement, ResolutionState, Resolutions, SkipReason, UnverifiedReason,
 };
 pub use schema::SchemaVersion;
 pub use tier::{Tier, Verdict};

@@ -22,6 +22,12 @@ use crate::tier::{Tier, Verdict};
 #[non_exhaustive]
 pub struct Escalation {
     /// The tier before this escalation.
+    ///
+    /// A statement about the *sequence*, and the reason a finished ledger is
+    /// never sorted: re-order the entries and this field stops agreeing with
+    /// the previous entry's [`to`](Self::to), so the ledger no longer replays
+    /// to the tier it reports. Determinism is bought on the accounting input
+    /// instead — see [`Resolutions`](crate::resolution::Resolutions).
     pub from: Tier,
     /// The tier after it.
     ///
@@ -69,6 +75,15 @@ pub struct Adjudicator {
     /// The accumulated tier. Private, and only `escalate` writes it.
     tier: Tier,
     /// Append-only record of every escalation, in the order they occurred.
+    ///
+    /// Which is the order the engine accounted resolutions in, and that order
+    /// is not the engine's to pick:
+    /// [`Resolutions::account_into`](crate::resolution::Resolutions::account_into)
+    /// walks its map ascending by
+    /// [`RequirementId`](crate::ids::RequirementId). So this ledger is a
+    /// function of which requirements resolved and how, not of the order the
+    /// tools happened to finish in — which matters because it ends up in a
+    /// bundle field.
     ledger: Vec<Escalation>,
 }
 
@@ -161,7 +176,13 @@ pub struct Adjudication {
     pub tier: Tier,
     /// The verdict, derived from the tier.
     pub verdict: Verdict,
-    /// Every escalation, in order.
+    /// Every escalation, in accounting order.
+    ///
+    /// A bundle field, and therefore part of what any digest over the
+    /// adjudication covers. See [`Resolutions`](crate::resolution::Resolutions)
+    /// for why that order is the ascending
+    /// [`RequirementId`](crate::ids::RequirementId) sequence rather than the
+    /// order capabilities finished resolving in.
     pub escalations: Vec<Escalation>,
 }
 
@@ -174,6 +195,15 @@ impl Adjudication {
     /// The first escalation that reached the final tier, if any.
     ///
     /// This is the "driven by" line in the pull-request comment.
+    ///
+    /// "First" means first *in accounting order*, so for a ledger built by
+    /// [`Resolutions::account_into`](crate::resolution::Resolutions::account_into)
+    /// this is the escalation of the lowest
+    /// [`RequirementId`](crate::ids::RequirementId) that reached the final
+    /// tier. Alphabetical, not causal — several independent requirements can
+    /// each reach the same tier on their own and no ordering among them is
+    /// truer than another. What this guarantees is that the same inputs always
+    /// name the same one, so the comment does not churn between re-runs.
     #[must_use]
     pub fn primary_cause(&self) -> Option<&Escalation> {
         self.escalations.iter().find(|e| e.to == self.tier)
