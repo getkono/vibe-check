@@ -133,8 +133,10 @@ fn an_ambient_git_dir_or_work_tree_cannot_redirect_a_fixture() {
     // The hash to beat: what a fixture produces with nothing ambient set.
     let expected = drive_a_fixture();
 
-    let scratch = TempDir::new().unwrap();
-    let scratch = root_of(&scratch);
+    // Held, not shadowed: dropping the `TempDir` would delete the paths the
+    // assertions below are about to look for.
+    let scratch_dir = TempDir::new().unwrap();
+    let scratch = root_of(&scratch_dir);
 
     // `GIT_DIR` alone — the variable a git hook exports, and the one that caused
     // the observed corruption. Without the fix, the fixture's `git init`
