@@ -14,7 +14,10 @@
 //! **Scrutiny only rises.** [`tier::Tier`] is a join-semilattice and
 //! [`adjudicate::Adjudicator`] exposes exactly one mutator,
 //! [`escalate`](adjudicate::Adjudicator::escalate). Nothing in a pull request
-//! can lower its own tier because no operation lowers a tier.
+//! can lower its own tier because no operation lowers a tier. An advisory
+//! requirement is not an exception: it escalates a *second* accumulator
+//! ([`adjudicate::Adjudicators`]) rather than a weakened one, and only the
+//! enforced ledger ever becomes a verdict.
 //!
 //! **Unverified is not a pass.** The four states in
 //! [`CapabilityResolution`](resolution::CapabilityResolution) are how a question
@@ -40,7 +43,10 @@ pub mod resolution;
 pub mod schema;
 pub mod tier;
 
-pub use adjudicate::{Adjudication, Adjudicator, Escalation};
+pub use adjudicate::{
+    Adjudication, Adjudicator, Adjudicators, AdvisoryAdjudication, EnforcedAdjudication,
+    Enforcement, Escalation,
+};
 pub use bundle::{BundleCore, Confidence, EvidenceBundle, Generator};
 pub use evidence::{
     CaseOutcome, CaseStatus, Evidence, EvidenceFacts, LocatedFinding, Metric, ParsedEvidence,
