@@ -87,7 +87,26 @@ pub struct BundleCore {
     pub advisory_tier: Tier,
     /// Every risk flag the classifier emitted, sorted.
     pub flag_ids: Vec<RiskFlagId>,
-    /// How each required capability was resolved.
+    /// How each required capability was resolved, one entry per capability.
+    ///
+    /// Keyed by a bare [`CapabilityId`] while the unit of resolution is a
+    /// *requirement* — a (capability × scope) pair — so a capability required
+    /// for two crates resolves twice and appears here once. The entry is those
+    /// resolutions collapsed by [`ResolutionState::collapse`]: **least
+    /// confident wins**. `tests-pass` adopted for `kono-core` and unverified
+    /// for `kono-net` reads `unverified`, never `adopt`.
+    ///
+    /// The rule is documented on the field because the field is frozen. A
+    /// consumer reading bundles going back as far as the repository does cannot
+    /// be asked to guess which of two disagreeing scopes an entry stood for,
+    /// and there is no later release in which the key could grow a scope to
+    /// disambiguate it.
+    ///
+    /// Collapsing is lossy by construction, and the loss is reported beside it
+    /// rather than hidden: [`Confidence::partial`] counts the capabilities
+    /// whose scopes disagreed. Read together, this map says what the worst
+    /// scope did and that count says how many capabilities had a scope disagree
+    /// at all.
     pub capability_states: BTreeMap<CapabilityId, ResolutionState>,
     /// Digest over the canonicalized verdict-bearing subtree.
     ///
@@ -174,6 +193,12 @@ pub struct Generator {
 /// capabilities: a capability can be adopted for one crate and run for another,
 /// so there is no single state to report for it.
 ///
+/// [`partial`](Self::partial) is the deliberate exception — it counts the
+/// capabilities that disagreed across their scopes, which is precisely the
+/// thing a requirement count cannot see — and it is the only one. Because the
+/// two units sit in one struct, and one sentence,
+/// [`sentence`](Self::sentence) names the unit whenever it prints that count.
+///
 /// `#[serde(default)]` at the container level, not only on the field that holds
 /// one. The bundle's `confidence` key already defaults when it is *absent*, but
 /// that does nothing for a `confidence` object written before a count existed:
@@ -194,7 +219,22 @@ pub struct Confidence {
     pub skipped: usize,
     /// Expected and unavailable.
     pub unverified: usize,
-    /// Requirements whose per-crate states disagreed.
+    /// **Capabilities** — not requirements — whose per-requirement states
+    /// disagreed.
+    ///
+    /// The one count in this struct over a different unit, because it measures
+    /// something no per-requirement count can. Scope is inside a requirement,
+    /// so a requirement has exactly one state and can never be "partial"; a
+    /// *capability* spans scopes, and
+    /// [`BundleCore::capability_states`](crate::bundle::BundleCore::capability_states)
+    /// shows only the least confident of them. This is how many entries in that
+    /// map hid a disagreement — the caveat a reader needs before treating a
+    /// `t0`-looking entry as the whole story.
+    ///
+    /// Only [`tally_by_capability`](Self::tally_by_capability) can compute it.
+    /// [`tally`](Self::tally) is handed states without the capability they
+    /// belong to, so it cannot group them and leaves this at zero — a zero
+    /// there means "not measured", not "measured and none".
     pub partial: usize,
     /// Requirements whose outcome could not raise the enforced tier.
     ///
@@ -215,18 +255,73 @@ impl Confidence {
     pub fn tally(states: impl IntoIterator<Item = (ResolutionState, Enforcement)>) -> Self {
         let mut c = Self::default();
         for (state, enforcement) in states {
-            c.requirements += 1;
-            if enforcement == Enforcement::Advisory {
-                c.advisory += 1;
-            }
-            match state {
-                ResolutionState::Adopt => c.adopted += 1,
-                ResolutionState::Run => c.ran += 1,
-                ResolutionState::Skip => c.skipped += 1,
-                ResolutionState::Unverified => c.unverified += 1,
-            }
+            c.count(state, enforcement);
         }
         c
+    }
+
+    /// Tally the same way, plus [`partial`](Self::partial), from requirements
+    /// that carry the capability they resolve.
+    ///
+    /// A second constructor rather than a wider item type on
+    /// [`tally`](Self::tally). Widening `tally` would force every caller to
+    /// produce a capability identity in order to get counts that do not depend
+    /// on one — including
+    /// [`Resolutions::states`](crate::resolution::Resolutions::states), which
+    /// cannot: a [`RequirementId`](crate::ids::RequirementId) is a digest of a
+    /// capability and its scope, so the capability is not recoverable from it.
+    /// A caller that has the identity to hand gets the extra count; one that
+    /// does not still gets every other count.
+    ///
+    /// The per-requirement counts come from the same private `count` as
+    /// `tally`, so the two constructors cannot drift into disagreeing about
+    /// what `adopted` means.
+    ///
+    /// The same iteration is what a caller needs in order to build
+    /// [`BundleCore::capability_states`](crate::bundle::BundleCore::capability_states)
+    /// with [`ResolutionState::collapse_all`]: one capability, every state its
+    /// requirements reached. Nothing constructs that map yet — see #45 — so
+    /// this returns the count and not the map, rather than guessing at the
+    /// shape the writer will want.
+    #[must_use]
+    pub fn tally_by_capability(
+        resolved: impl IntoIterator<Item = (CapabilityId, ResolutionState, Enforcement)>,
+    ) -> Self {
+        let mut c = Self::default();
+        // `(first state seen, has any later state differed)`. A `BTreeMap` and
+        // not a hash map because this crate's determinism rules apply even to a
+        // count: iteration order is not observed here today, and pinning it
+        // costs nothing.
+        let mut per_capability: BTreeMap<CapabilityId, (ResolutionState, bool)> = BTreeMap::new();
+        for (capability, state, enforcement) in resolved {
+            c.count(state, enforcement);
+            per_capability
+                .entry(capability)
+                .and_modify(|(first, disagreed)| *disagreed |= *first != state)
+                .or_insert((state, false));
+        }
+        c.partial = per_capability
+            .values()
+            .filter(|(_, disagreed)| *disagreed)
+            .count();
+        c
+    }
+
+    /// Count one resolved requirement into every per-requirement field.
+    ///
+    /// The single place a state becomes a number, so `tally` and
+    /// `tally_by_capability` are the same tally with one extra question asked.
+    fn count(&mut self, state: ResolutionState, enforcement: Enforcement) {
+        self.requirements += 1;
+        if enforcement == Enforcement::Advisory {
+            self.advisory += 1;
+        }
+        match state {
+            ResolutionState::Adopt => self.adopted += 1,
+            ResolutionState::Run => self.ran += 1,
+            ResolutionState::Skip => self.skipped += 1,
+            ResolutionState::Unverified => self.unverified += 1,
+        }
     }
 
     /// The confidence sentence, without the leading tier.
@@ -253,6 +348,19 @@ impl Confidence {
         }
         if self.unverified > 0 {
             parts.push(format!("{} unverified", self.unverified));
+        }
+        // Trails the state counts and names its own unit, unlike every sibling
+        // part. The counts above are over requirements, this one is over
+        // capabilities, and the sentence opens with a requirement count printed
+        // under the word "capabilities" — so a bare "1 partial" here would be
+        // divided by the wrong denominator by exactly the reader it is for.
+        if self.partial > 0 {
+            let unit = if self.partial == 1 {
+                "capability"
+            } else {
+                "capabilities"
+            };
+            parts.push(format!("{} {unit} partial across scopes", self.partial));
         }
         let noun = if self.requirements == 1 {
             "capability"
@@ -527,6 +635,177 @@ mod tests {
     fn confidence_sentence_omits_empty_categories() {
         let c = Confidence::tally([(ResolutionState::Run, Enforcement::Enforcing)]);
         assert_eq!(c.sentence(), "1 capability · 1 run");
+    }
+
+    /// The case `capability_states`' key forces, end to end.
+    ///
+    /// One capability, two scopes, two disagreeing resolutions: the map entry
+    /// is the unverified one and `partial` says a scope disagreed. Neither half
+    /// is enough alone — the entry alone loses that `kono-core` passed, and the
+    /// count alone loses which way the disagreement went.
+    #[test]
+    fn a_capability_adopted_in_one_scope_and_unverified_in_another() {
+        let tests_pass = CapabilityId::new("tests-pass");
+        let resolved = [
+            (
+                tests_pass.clone(),
+                ResolutionState::Adopt,
+                Enforcement::Enforcing,
+            ),
+            (
+                tests_pass.clone(),
+                ResolutionState::Unverified,
+                Enforcement::Enforcing,
+            ),
+        ];
+
+        let states: BTreeMap<CapabilityId, ResolutionState> = BTreeMap::from([(
+            tests_pass.clone(),
+            ResolutionState::collapse_all(resolved.iter().map(|(_, state, _)| *state))
+                .expect("two requirements resolved"),
+        )]);
+        assert_eq!(
+            states.get(&tests_pass),
+            Some(&ResolutionState::Unverified),
+            "the frozen map must show the scope nothing answered, not the one \
+             that passed"
+        );
+
+        let c = Confidence::tally_by_capability(resolved);
+        assert_eq!(c.requirements, 2, "two requirements, still counted as two");
+        assert_eq!(c.partial, 1, "one capability disagreed with itself");
+        assert_eq!(c.adopted, 1);
+        assert_eq!(c.unverified, 1);
+    }
+
+    #[test]
+    fn agreeing_scopes_are_not_partial() {
+        // A capability required twice and resolved the same way both times is
+        // not a disagreement, and must not be reported as one — otherwise every
+        // monorepo bundle carries a permanent caveat that means nothing.
+        let c = Confidence::tally_by_capability([
+            (
+                CapabilityId::new("tests-pass"),
+                ResolutionState::Run,
+                Enforcement::Enforcing,
+            ),
+            (
+                CapabilityId::new("tests-pass"),
+                ResolutionState::Run,
+                Enforcement::Enforcing,
+            ),
+            (
+                CapabilityId::new("clippy-clean"),
+                ResolutionState::Adopt,
+                Enforcement::Advisory,
+            ),
+        ]);
+        assert_eq!(c.partial, 0);
+        assert_eq!(c.requirements, 3);
+        assert_eq!(c.advisory, 1);
+    }
+
+    #[test]
+    fn the_two_tallies_agree_on_every_requirement_count() {
+        // `tally_by_capability` must be `tally` plus one question, not a second
+        // opinion about what `adopted` means.
+        let resolved = [
+            (
+                CapabilityId::new("tests-pass"),
+                ResolutionState::Adopt,
+                Enforcement::Enforcing,
+            ),
+            (
+                CapabilityId::new("tests-pass"),
+                ResolutionState::Unverified,
+                Enforcement::Advisory,
+            ),
+            (
+                CapabilityId::new("clippy-clean"),
+                ResolutionState::Run,
+                Enforcement::Enforcing,
+            ),
+            (
+                CapabilityId::new("miri-clean"),
+                ResolutionState::Skip,
+                Enforcement::Enforcing,
+            ),
+        ];
+        let by_capability = Confidence::tally_by_capability(resolved.clone());
+        let flat = Confidence::tally(
+            resolved
+                .iter()
+                .map(|(_, state, enforcement)| (*state, *enforcement)),
+        );
+
+        assert_eq!(by_capability.requirements, flat.requirements);
+        assert_eq!(by_capability.adopted, flat.adopted);
+        assert_eq!(by_capability.ran, flat.ran);
+        assert_eq!(by_capability.skipped, flat.skipped);
+        assert_eq!(by_capability.unverified, flat.unverified);
+        assert_eq!(by_capability.advisory, flat.advisory);
+        assert_eq!(
+            (by_capability.partial, flat.partial),
+            (1, 0),
+            "only the constructor given capability identities can measure this"
+        );
+    }
+
+    #[test]
+    fn the_sentence_names_the_unit_it_counts_partial_in() {
+        // The sentence opens with a *requirement* count under the word
+        // "capabilities" and `partial` is a *capability* count, so this part
+        // carries its own noun. A bare "1 partial" would be read as one
+        // requirement in four.
+        let c = Confidence::tally_by_capability([
+            (
+                CapabilityId::new("tests-pass"),
+                ResolutionState::Adopt,
+                Enforcement::Enforcing,
+            ),
+            (
+                CapabilityId::new("tests-pass"),
+                ResolutionState::Unverified,
+                Enforcement::Enforcing,
+            ),
+        ]);
+        assert_eq!(
+            c.sentence(),
+            "2 capabilities · 1 adopted · 1 unverified · 1 capability partial across scopes"
+        );
+    }
+
+    #[test]
+    fn several_partial_capabilities_are_pluralized() {
+        let c = Confidence::tally_by_capability([
+            (
+                CapabilityId::new("clippy-clean"),
+                ResolutionState::Run,
+                Enforcement::Enforcing,
+            ),
+            (
+                CapabilityId::new("clippy-clean"),
+                ResolutionState::Skip,
+                Enforcement::Enforcing,
+            ),
+            (
+                CapabilityId::new("tests-pass"),
+                ResolutionState::Adopt,
+                Enforcement::Enforcing,
+            ),
+            (
+                CapabilityId::new("tests-pass"),
+                ResolutionState::Unverified,
+                Enforcement::Enforcing,
+            ),
+        ]);
+        assert_eq!(c.partial, 2);
+        assert!(
+            c.sentence()
+                .ends_with("2 capabilities partial across scopes"),
+            "{}",
+            c.sentence()
+        );
     }
 
     #[test]
