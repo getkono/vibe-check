@@ -49,6 +49,12 @@ fn any_state() -> impl Strategy<Value = ResolutionState> {
     ]
 }
 
+/// A list of states and a permutation of that same list.
+fn a_permuted_pair() -> impl Strategy<Value = (Vec<ResolutionState>, Vec<ResolutionState>)> {
+    prop::collection::vec(any_state(), 1..12)
+        .prop_flat_map(|states| (Just(states.clone()), Just(states).prop_shuffle()))
+}
+
 proptest! {
     /// Order of evidence must not change the entry. Scopes resolve
     /// concurrently, so a non-commutative collapse would make a frozen bundle
@@ -118,16 +124,14 @@ proptest! {
     /// it directly means a future rewrite of `collapse_all` — a `sort` and a
     /// `first`, say — is checked against the thing that matters rather than
     /// against the laws it was derived from.
+    ///
+    /// An arbitrary permutation, not a rotation: scopes finish in whatever
+    /// order the runners return them, which is not a rotation of anything.
     #[test]
-    fn collapse_all_ignores_order(
-        states in prop::collection::vec(any_state(), 1..12),
-        rotation in 0usize..12,
-    ) {
-        let mut rotated = states.clone();
-        rotated.rotate_left(rotation % states.len());
+    fn collapse_all_ignores_order((states, shuffled) in a_permuted_pair()) {
         prop_assert_eq!(
-            ResolutionState::collapse_all(states.iter().copied()),
-            ResolutionState::collapse_all(rotated),
+            ResolutionState::collapse_all(states),
+            ResolutionState::collapse_all(shuffled),
         );
     }
 }
