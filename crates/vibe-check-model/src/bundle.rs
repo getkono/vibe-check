@@ -27,7 +27,7 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::adjudicate::{AdvisoryAdjudication, EnforcedAdjudication};
+use crate::adjudicate::{AdvisoryAdjudication, EnforcedAdjudication, Enforcement, Escalation};
 use crate::ids::{CapabilityId, RiskFlagId};
 use crate::resolution::ResolutionState;
 use crate::schema::SchemaVersion;
@@ -159,10 +159,10 @@ pub struct Generator {
 
 /// How much of the picture we actually have.
 ///
-/// Rendered as the confidence sentence: *"T2 on 8 capabilities, 2 adopted,
-/// 5 run, 1 unverified."* Counting is over **requirements**, not capabilities:
-/// a capability can be adopted for one crate and run for another, so there is no
-/// single state to report for it.
+/// Rendered as the confidence sentence: *"T2 on 8 capabilities, 3 advisory,
+/// 2 adopted, 5 run, 1 unverified."* Counting is over **requirements**, not
+/// capabilities: a capability can be adopted for one crate and run for another,
+/// so there is no single state to report for it.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct Confidence {
@@ -178,15 +178,29 @@ pub struct Confidence {
     pub unverified: usize,
     /// Requirements whose per-crate states disagreed.
     pub partial: usize,
+    /// Requirements whose outcome could not raise the enforced tier.
+    ///
+    /// Counted across all four states, not only failures: "3 requirements were
+    /// advisory" is the number a reader needs in order to know how much of the
+    /// verdict was not being enforced. Orthogonal to the other counts, so it
+    /// does not sum with them.
+    pub advisory: usize,
 }
 
 impl Confidence {
-    /// Tally a set of resolution states.
+    /// Tally a set of resolution states and the enforcement they carried.
+    ///
+    /// Takes the pair rather than the state alone: a count of advisory
+    /// requirements that had to be assembled separately would be a count that
+    /// can disagree with the states beside it.
     #[must_use]
-    pub fn tally(states: impl IntoIterator<Item = ResolutionState>) -> Self {
+    pub fn tally(states: impl IntoIterator<Item = (ResolutionState, Enforcement)>) -> Self {
         let mut c = Self::default();
-        for state in states {
+        for (state, enforcement) in states {
             c.requirements += 1;
+            if enforcement == Enforcement::Advisory {
+                c.advisory += 1;
+            }
             match state {
                 ResolutionState::Adopt => c.adopted += 1,
                 ResolutionState::Run => c.ran += 1,
@@ -204,6 +218,12 @@ impl Confidence {
     #[must_use]
     pub fn sentence(&self) -> String {
         let mut parts = Vec::new();
+        // Advisory leads. Burying it after the state counts is how a comment
+        // ends up truthfully saying "8 capabilities, 1 unverified" about a run
+        // in which the unverified one was never going to block anything.
+        if self.advisory > 0 {
+            parts.push(format!("{} advisory", self.advisory));
+        }
         if self.adopted > 0 {
             parts.push(format!("{} adopted", self.adopted));
         }
@@ -245,6 +265,16 @@ pub struct EvidenceBundle {
     pub generator: Generator,
     /// The verdict and every escalation that led to it.
     pub adjudication: crate::adjudicate::Adjudication,
+    /// Every escalation the advisory ledger recorded and did not enforce.
+    ///
+    /// Outside `core` on purpose: it is a list, it is additive, and a `Vec` has
+    /// a `Default` where an `Adjudication` does not — so an older bundle that
+    /// predates advisory reads back as "no advisory escalations" rather than
+    /// failing to parse. It is deliberately not an `Adjudication`: that type
+    /// always carries a verdict derived from its tier, and a bundle must carry
+    /// exactly one verdict.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub advisory_escalations: Vec<Escalation>,
     /// Requirement counts.
     #[serde(default)]
     pub confidence: Confidence,
@@ -301,10 +331,11 @@ mod tests {
                 registry_digest: "blake3:0f22".into(),
             },
             adjudication: enforced.into_adjudication(),
+            advisory_escalations: advisory.into_escalations(),
             confidence: Confidence::tally([
-                ResolutionState::Adopt,
-                ResolutionState::Run,
-                ResolutionState::Unverified,
+                (ResolutionState::Adopt, Enforcement::Enforcing),
+                (ResolutionState::Run, Enforcement::Enforcing),
+                (ResolutionState::Unverified, Enforcement::Advisory),
             ]),
             extensions: serde_json::Map::new(),
         }
@@ -391,21 +422,51 @@ mod tests {
     #[test]
     fn confidence_sentence_counts_requirements() {
         let c = Confidence::tally([
-            ResolutionState::Adopt,
-            ResolutionState::Adopt,
-            ResolutionState::Run,
-            ResolutionState::Unverified,
+            (ResolutionState::Adopt, Enforcement::Enforcing),
+            (ResolutionState::Adopt, Enforcement::Enforcing),
+            (ResolutionState::Run, Enforcement::Enforcing),
+            (ResolutionState::Unverified, Enforcement::Advisory),
         ]);
         assert_eq!(
             c.sentence(),
-            "4 capabilities · 2 adopted · 1 run · 1 unverified"
+            "4 capabilities · 1 advisory · 2 adopted · 1 run · 1 unverified",
+            "the advisory count leads, so a reader cannot miss how much of this \
+             verdict was not being enforced"
         );
     }
 
     #[test]
     fn confidence_sentence_omits_empty_categories() {
-        let c = Confidence::tally([ResolutionState::Run]);
+        let c = Confidence::tally([(ResolutionState::Run, Enforcement::Enforcing)]);
         assert_eq!(c.sentence(), "1 capability · 1 run");
+    }
+
+    #[test]
+    fn the_advisory_ledger_rides_outside_the_frozen_core() {
+        // `advisory_escalations` is additive and lives outside `core`, so it
+        // costs nothing permanent. Its absence must read as "none" rather than
+        // as a parse failure, or every bundle written before this field existed
+        // becomes unreadable.
+        let json = serde_json::to_value(bundle()).expect("serialize");
+        assert!(
+            json.get("core")
+                .and_then(|c| c.get("advisory_escalations"))
+                .is_none()
+        );
+        assert_eq!(
+            json.get("advisory_escalations")
+                .and_then(serde_json::Value::as_array)
+                .map(Vec::len),
+            Some(1)
+        );
+
+        let mut older = json.clone();
+        older
+            .as_object_mut()
+            .expect("object")
+            .remove("advisory_escalations");
+        let parsed: EvidenceBundle = serde_json::from_value(older).expect("deserialize");
+        assert!(parsed.advisory_escalations.is_empty());
     }
 
     #[test]
