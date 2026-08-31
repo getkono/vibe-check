@@ -22,6 +22,37 @@
 //! Adding `impl From<CheckRun> for Artifact` would be the single most damaging
 //! change available in this workspace. There is no such impl, and there must
 //! never be one.
+//!
+//! # Forks are not a trust boundary here
+//!
+//! A fork pull request is adoptable. Reading the `head_repo` fields below as
+//! though it were not is the mistake this section exists to prevent, because
+//! that reading makes every external contribution fully unverified — and
+//! therefore escalated — for no security gain whatsoever.
+//!
+//! For a `pull_request` event the workflow definition comes from the **base
+//! branch**, and the run executes **in the base repository**. The API says so
+//! directly: a workflow run reports `repository`, which is the base repository
+//! and the only authority, separately from `head_repository`, which is the fork
+//! the head branch lives in. Artifacts belong to the base repository and are
+//! readable with `actions: read`, fork pull requests included. The base
+//! repository's own CI *is* the evidence producer for a fork pull request.
+//!
+//! So `head_repository` is a **consistency check** — does the run being adopted
+//! from describe the same head branch as the pull request in front of us — and
+//! never a trust anchor. It is compared against
+//! [`PullRequest::head_repo`], never against the base repository.
+//!
+//! The residual weakness, stated in the same breath so none of the above reads
+//! as "forks are fine now": the workflow *definition* is trusted, and the *code
+//! it runs* is not. A fork still chooses much of what the base repository's CI
+//! compiles and executes — through `build.rs`, `.cargo/config.toml`, the body of
+//! a test, or a `[patch]` in a manifest. Adoption therefore establishes
+//! **provenance**, not integrity: it says which run produced these bytes, not
+//! that the run measured what its name suggests. Constraining what a run is
+//! permitted to answer is the gate-integrity problem, decided by policy read
+//! from the merge base — never by which repository the head branch happened to
+//! live in.
 
 use async_trait::async_trait;
 use jiff::Timestamp;
@@ -53,7 +84,7 @@ impl RepoId {
     }
 }
 
-/// A workflow run.
+/// Identifies a workflow run and attempt.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub struct RunRef {
     /// Run identifier.
@@ -74,9 +105,14 @@ pub struct PullRequest {
     /// `GITHUB_SHA` during a `pull_request` event, which is the synthetic merge
     /// commit.
     pub head_sha: String,
-    /// The repository the head branch lives in. Differs from the base repo for
-    /// fork pull requests, and evidence from an unexpected head repo is not
-    /// adoptable.
+    /// The repository the head branch lives in — the fork, for a fork pull
+    /// request.
+    ///
+    /// This is the value a candidate workflow run's `head_repository` is
+    /// compared **against**: a consistency check between two descriptions of the
+    /// same head branch. It is never compared against the base repository, and
+    /// differing from the base repository says nothing about adoptability. See
+    /// the module documentation.
     pub head_repo: Option<RepoId>,
     /// Base branch name.
     pub base_ref: String,
@@ -151,7 +187,13 @@ pub struct ArtifactMeta {
     /// Cross-checked against the pull-request head. An artifact that cannot be
     /// tied to this commit is not adoptable, however green the check looked.
     pub head_sha: String,
-    /// The repository the producing run belonged to.
+    /// The repository the *head branch* of the producing run lived in — the
+    /// fork, for a fork pull request.
+    ///
+    /// Not the repository the producing run belonged to, and not the repository
+    /// this artifact belongs to: for a `pull_request` event both of those are the
+    /// **base** repository. Cross-checked against [`PullRequest::head_repo`],
+    /// never against the base repository. See the module documentation.
     pub head_repo: Option<RepoId>,
     /// When it was created.
     pub created_at: Timestamp,
