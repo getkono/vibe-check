@@ -14,9 +14,22 @@
 //! second, so every hash in a golden file would be wrong on the next run.
 //!
 //! Pinning identity and dates makes the hashes deterministic, which means a
-//! snapshot can contain a real commit hash and stay meaningful. Everything here
-//! is passed explicitly rather than read from the environment, so a developer's
-//! own git configuration cannot reach in and change a test result.
+//! snapshot can contain a real commit hash and stay meaningful.
+//!
+//! # What the ambient environment can and cannot still do
+//!
+//! Identity, dates and the two config *files* are passed explicitly rather than
+//! read from the environment, and [`TestRepo::git`] additionally strips the
+//! variables that would redirect a fixture onto somebody else's repository.
+//!
+//! That is not the same as "a developer's git configuration cannot change a test
+//! result", and this module should not claim it is. `GIT_CONFIG_COUNT` with
+//! `GIT_CONFIG_KEY_n`/`GIT_CONFIG_VALUE_n`, and `GIT_CONFIG_PARAMETERS`, are
+//! separate config channels that outrank `GIT_CONFIG_GLOBAL=/dev/null` rather
+//! than being silenced by it — and git exports the latter into hook processes
+//! whenever anyone runs `git -c <key>=<value> ...`. Either one still reaches a
+//! fixture. Closing them means building the child environment from empty, with
+//! an allowlist, which is a larger change than the redirection fix below.
 
 use std::process::Command;
 
@@ -161,15 +174,27 @@ impl TestRepo {
             // configuration must not be able to change a test outcome — the same
             // reasoning that makes vibe-check itself pin these when it shells out.
             //
-            // `GIT_DIR` and `GIT_WORK_TREE` are *removed* rather than pinned,
-            // because they are not configuration, they are redirection: both
-            // outrank `current_dir`, so an inherited one aims every command in
-            // this module at a repository the fixture never created. Git exports
-            // `GIT_DIR` into every hook process, so a test suite run from a git
-            // hook would otherwise `git init` over the real repository and commit
-            // fixture files into it.
+            // `GIT_DIR`, `GIT_WORK_TREE` and `GIT_INDEX_FILE` are *removed*
+            // rather than pinned, because they are not configuration, they are
+            // redirection: each one outranks `current_dir`, so an inherited one
+            // aims the commands below at a repository, a worktree or an index
+            // that the fixture never created.
+            //
+            // They arrive from git itself, and specifically from a **linked
+            // worktree**, which is how this repository is developed. Measured on
+            // git 2.55: from a linked worktree, `GIT_DIR` is exported to the
+            // pre-commit, post-commit, post-index-change and pre-push hooks, and
+            // `GIT_INDEX_FILE` to the commit-time ones. From a flat clone both
+            // are empty in all of them — so a reproduction attempt in a plain
+            // clone finds nothing, which is why this went unnoticed.
+            //
+            // The `hk` pre-push hook runs `mise run test`. Pushing from a
+            // worktree therefore pointed this crate's fixtures at the real
+            // checkout: `git init` reinitialized it, and `git add --all` wrote
+            // the fixture's files over its index.
             .env_remove("GIT_DIR")
             .env_remove("GIT_WORK_TREE")
+            .env_remove("GIT_INDEX_FILE")
             .env("GIT_CONFIG_GLOBAL", "/dev/null")
             .env("GIT_CONFIG_SYSTEM", "/dev/null")
             .env("GIT_AUTHOR_NAME", AUTHOR_NAME)
