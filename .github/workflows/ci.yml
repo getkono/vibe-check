@@ -52,5 +52,14 @@ jobs:
       # `convco` is pinned in mise.toml; installing it unpinned here would let
       # CI validate against a different version than the commit-msg hook does.
       - uses: jdx/mise-action@v2
+      # `origin/$BASE_REF` is the live base branch, not the
+      # `github.event.pull_request.base.sha` tip recorded when the event fired,
+      # which drifts as the base branch moves. Two dots, not three: `convco
+      # check` documents its argument as `<commit>..<commit>` and rejects a
+      # three-dot range outright. The ref travels through the environment so a
+      # branch name can never be spliced into the shell. `convco` skips merge
+      # commits, so the synthetic `refs/pull/N/merge` head is not checked.
       - name: Check commits
-        run: convco check ${{ github.event.pull_request.base.sha }}..${{ github.event.pull_request.head.sha }}
+        env:
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+        run: convco check "origin/$BASE_REF..HEAD"
