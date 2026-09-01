@@ -691,6 +691,15 @@ impl Resolutions {
     /// scope collision, and a silent last-wins would resolve it by dropping
     /// whichever arrived first — which, if that was the failing one, is a
     /// fail-open. The caller decides; this type refuses to decide quietly.
+    ///
+    /// `#[must_use]` is what makes "the caller decides" true rather than
+    /// aspirational. Without it `resolutions.insert(id, e, r);` compiles as a
+    /// statement and throws the displaced value away, which is the silent
+    /// last-wins this method exists to prevent, reintroduced by a semicolon.
+    /// Discarding it is still allowed — with `let _ =`, which is a thing a
+    /// reviewer can see.
+    #[must_use = "the displaced resolution is a scope collision; drop it explicitly \
+                  with `let _ =` if that is really what you mean"]
     pub fn insert(
         &mut self,
         requirement: RequirementId,
@@ -759,7 +768,8 @@ mod tests {
     use jiff::Timestamp;
 
     fn requirement() -> RequirementId {
-        RequirementId::new("req_tests-pass_all")
+        RequirementId::from_wire("req_tests-pass_0000000000000000")
+            .expect("a well-formed fixture identifier")
     }
 
     fn evidence_with(provenance: Provenance) -> Box<Evidence> {

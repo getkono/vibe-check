@@ -71,15 +71,27 @@ fn unattributed_keeps_the_bytes_it_already_wrote() {
 /// visible edit to a test rather than a silent change to every bundle.
 #[test]
 fn a_string_payload_is_adjacent_to_its_tag() {
-    let evidence = EvidenceRef::Requirement(RequirementId::new("req_tests-pass_all"));
-    assert_eq!(
-        serde_json::to_string(&evidence).expect("serialize"),
-        r#"{"kind":"requirement","ref":"req_tests-pass_all"}"#
+    const WIRE: &str = "req_tests-pass_0000000000000000";
+    let evidence = EvidenceRef::Requirement(
+        RequirementId::from_wire(WIRE).expect("a well-formed fixture identifier"),
     );
     assert_eq!(
-        serde_json::from_str::<EvidenceRef>(r#"{"kind":"requirement","ref":"req_tests-pass_all"}"#)
+        serde_json::to_string(&evidence).expect("serialize"),
+        format!(r#"{{"kind":"requirement","ref":"{WIRE}"}}"#)
+    );
+    assert_eq!(
+        serde_json::from_str::<EvidenceRef>(&format!(r#"{{"kind":"requirement","ref":"{WIRE}"}}"#))
             .expect("deserialize"),
         evidence
+    );
+
+    // The other half of the shape check: `RequirementId` hand-writes
+    // `Deserialize` so the wire form is filtered, and an identifier somebody
+    // invented rather than derived does not arrive as one.
+    assert!(
+        serde_json::from_str::<EvidenceRef>(r#"{"kind":"requirement","ref":"req_tests-pass_all"}"#)
+            .is_err(),
+        "a requirement id that was never derived must not deserialize"
     );
 }
 
@@ -164,13 +176,16 @@ fn the_two_encoders_agree_about_policy() {
 #[test]
 fn an_escalation_ledger_reaches_json() {
     let mut resolutions = Resolutions::new();
-    resolutions.insert(
-        RequirementId::new("req_apple"),
+    let apple = RequirementId::from_wire("req_apple_0000000000000000")
+        .expect("a well-formed fixture identifier");
+    let displaced = resolutions.insert(
+        apple.clone(),
         Enforcement::Enforcing,
         CapabilityResolution::Unverified {
             reason: UnverifiedReason::MissingEvidence,
         },
     );
+    assert!(displaced.is_none());
     let mut adjudicators = Adjudicators::new();
     resolutions.account_into(&mut adjudicators);
     let ledger = adjudicators.finish().0.into_adjudication().escalations;
@@ -178,7 +193,7 @@ fn an_escalation_ledger_reaches_json() {
 
     let json = serde_json::to_string(&ledger).expect("the ledger serializes");
     assert!(
-        json.contains(r#""kind":"requirement","ref":"req_apple""#),
+        json.contains(&format!(r#""kind":"requirement","ref":"{apple}""#)),
         "the escalation names its requirement on the wire: {json}"
     );
     let back: Vec<vibe_check_model::Escalation> =

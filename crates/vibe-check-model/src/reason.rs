@@ -367,7 +367,10 @@ mod tests {
                 id: "core-unsafe".into(),
                 blob_sha: Some("e41d".into()),
             }),
-            EvidenceRef::Requirement(RequirementId::new("req_tests-pass_all")),
+            EvidenceRef::Requirement(
+                RequirementId::from_wire("req_tests-pass_0000000000000000")
+                    .expect("a well-formed fixture identifier"),
+            ),
             EvidenceRef::Capability(CapabilityId::new("loom-clean")),
             EvidenceRef::Flag {
                 flag: RiskFlagId::new("unsafe"),

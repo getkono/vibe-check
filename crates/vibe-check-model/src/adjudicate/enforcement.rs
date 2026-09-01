@@ -275,7 +275,8 @@ mod tests {
     use proptest::prelude::*;
 
     fn requirement() -> RequirementId {
-        RequirementId::new("req_tests-pass_all")
+        RequirementId::from_wire("req_tests-pass_0000000000000000")
+            .expect("a well-formed fixture identifier")
     }
 
     fn measured() -> Box<Evidence> {

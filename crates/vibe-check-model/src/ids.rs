@@ -23,13 +23,34 @@ use std::fmt;
 use serde::{Deserialize, Serialize};
 use smol_str::SmolStr;
 
+use crate::scope::{RECORD_SEPARATOR, RequirementScope};
+
 /// Declare an interned-string identifier newtype.
+///
+/// # Two arms, and why the difference matters
+///
+/// The ordinary arm — `id_newtype! { Foo }` — emits infallible constructors:
+/// `new`, `From<&str>` and `From<String>`. For an identifier that is *quoted*
+/// from a document somebody else wrote, that is right: the value already exists,
+/// this build's job is to carry it, and refusing to represent it is how you fail
+/// open on a flag you could not parse.
+///
+/// The `@derived_only` arm emits everything except those three. It exists for
+/// [`RequirementId`], whose value is not quoted from anywhere — it is *computed*
+/// from a capability and a scope, and two computations that should differ must
+/// not be able to agree. An infallible `new` next to that is not a convenience;
+/// it is the bypass, and a bypass that is one keystroke shorter than the
+/// derivation is the one that gets used.
+///
+/// The arms share a body rather than duplicating one: the ordinary arm invokes
+/// the `@derived_only` arm and then adds the three constructors and a
+/// pass-through `Deserialize`. `Deserialize` is added by the outer arm rather
+/// than derived in the shared body for the same reason `LeafId` writes its own:
+/// `#[serde(transparent)]` is a construction path no macro arm can suppress, so
+/// a type that wants its wire form checked has to own that impl.
 macro_rules! id_newtype {
     ($(#[$meta:meta])* $name:ident) => {
-        $(#[$meta])*
-        #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-        #[serde(transparent)]
-        pub struct $name(SmolStr);
+        id_newtype! { @derived_only $(#[$meta])* $name }
 
         impl $name {
             /// Construct from anything string-like.
@@ -37,7 +58,40 @@ macro_rules! id_newtype {
             pub fn new(id: impl AsRef<str>) -> Self {
                 Self(SmolStr::new(id.as_ref()))
             }
+        }
 
+        impl From<&str> for $name {
+            fn from(id: &str) -> Self {
+                Self::new(id)
+            }
+        }
+
+        impl From<String> for $name {
+            fn from(id: String) -> Self {
+                Self(SmolStr::new(id))
+            }
+        }
+
+        // What `#[derive(Deserialize)]` with `#[serde(transparent)]` would
+        // emit, written out because the shared body cannot derive it
+        // conditionally. The wire form is a bare string either way.
+        impl<'de> Deserialize<'de> for $name {
+            fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+            where
+                D: serde::Deserializer<'de>,
+            {
+                Ok(Self(SmolStr::deserialize(deserializer)?))
+            }
+        }
+    };
+
+    (@derived_only $(#[$meta:meta])* $name:ident) => {
+        $(#[$meta])*
+        #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
+        #[serde(transparent)]
+        pub struct $name(SmolStr);
+
+        impl $name {
             /// Borrow the identifier as a string slice.
             #[must_use]
             pub fn as_str(&self) -> &str {
@@ -56,18 +110,6 @@ macro_rules! id_newtype {
         impl fmt::Debug for $name {
             fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
                 write!(f, concat!(stringify!($name), "({:?})"), self.0.as_str())
-            }
-        }
-
-        impl From<&str> for $name {
-            fn from(id: &str) -> Self {
-                Self::new(id)
-            }
-        }
-
-        impl From<String> for $name {
-            fn from(id: String) -> Self {
-                Self(SmolStr::new(id))
             }
         }
 
@@ -153,15 +195,251 @@ id_newtype! {
 }
 
 id_newtype! {
+    @derived_only
     /// Identifies a requirement — a *(capability × scope)* pair after the
     /// monorepo union.
     ///
     /// Requirements, not capabilities, are the unit of resolution. A bare
     /// capability identifier loses scope, and scope is what says Miri should run
-    /// over `kono-core` alone rather than the whole workspace. Derived from a
-    /// digest of the capability and its canonicalized scope, so the same
-    /// requirement computed twice gets the same identifier.
+    /// over `kono-core` alone rather than the whole workspace.
+    ///
+    /// # Form
+    ///
+    /// `req_<capability>_<16 hex>`, where the hex is the leading 128 bits of
+    /// `blake3(capability ⧺ \u{1e} ⧺ scope.canonical_bytes())`. The capability
+    /// stays readable because this string is a CI matrix entry and a `--id`
+    /// argument, and somebody debugging a fan-out has to be able to see which
+    /// question a leaf is answering.
+    ///
+    /// The readable half is *lossy* — see [`derive`](Self::derive) — and the
+    /// digest is not: two capabilities that render to the same readable half
+    /// still get different digests, because the digest is taken over the
+    /// capability as written.
+    ///
+    /// # Construction
+    ///
+    /// [`derive`](Self::derive) computes one; [`from_wire`](Self::from_wire)
+    /// re-reads one that was already computed. There is deliberately no `new`,
+    /// no `From<&str>` and no `From<String>` — this is the one identifier in
+    /// this module the workspace *mints* rather than quotes, and a hand-written
+    /// value that merely looks plausible is the collision this type exists to
+    /// prevent. The macro's `@derived_only` arm is what withholds them.
+    ///
+    /// # Why a collision is a fail-open
+    ///
+    /// [`Resolutions`](crate::resolution::Resolutions) is a map keyed by this
+    /// type. Two requirements sharing an identifier means one resolution
+    /// displaces the other, and a displaced *failing* resolution reads, from the
+    /// outside, as a question that was answered. `Resolutions::insert` returns
+    /// what it displaced so the caller can see it happen; this type's job is to
+    /// make sure it does not happen.
     RequirementId
+}
+
+/// The prefix every requirement identifier carries.
+const REQUIREMENT_PREFIX: &str = "req_";
+
+/// How many hex characters of digest a requirement identifier carries.
+///
+/// 16 hex characters is 64 bits. Requirement identifiers are compared for
+/// equality within a single run's plan — tens to low thousands of entries — so
+/// the birthday bound is comfortable, and the string has to stay short enough to
+/// read in a CI matrix entry.
+const REQUIREMENT_DIGEST_HEX: usize = 16;
+
+/// Whether `character` may appear in the readable half of a requirement
+/// identifier.
+///
+/// `_` is deliberately excluded even though [`LeafId`] allows it: it is the
+/// field separator, and excluding it from the field means the identifier
+/// contains exactly two underscores and the digest boundary is unambiguous.
+fn is_requirement_capability_char(character: char) -> bool {
+    character.is_ascii_lowercase() || character.is_ascii_digit() || matches!(character, '.' | '-')
+}
+
+/// Why a recorded requirement identifier was rejected.
+///
+/// Shape only. None of these say the identifier was *correctly derived* — that
+/// cannot be rechecked without the scope, which the wire form does not carry.
+/// See [`RequirementId::from_wire`].
+#[derive(Clone, PartialEq, Eq, Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum RequirementIdError {
+    /// Did not start with `req_`.
+    #[error("a requirement id must start with `{REQUIREMENT_PREFIX}`, got {got:?}")]
+    MissingPrefix {
+        /// The value as it arrived.
+        got: String,
+    },
+
+    /// Carried no `_` after the prefix, so there was no digest to find.
+    #[error(
+        "a requirement id must be `req_<capability>_<{REQUIREMENT_DIGEST_HEX} hex>`;          {got:?} has no digest separator"
+    )]
+    MissingDigest {
+        /// The value as it arrived.
+        got: String,
+    },
+
+    /// The trailing field was not exactly 16 lowercase hex characters.
+    #[error(
+        "a requirement id's digest must be {REQUIREMENT_DIGEST_HEX} lowercase hex          characters, got {got:?}"
+    )]
+    MalformedDigest {
+        /// The trailing field as it arrived.
+        got: String,
+    },
+
+    /// The readable half held something `derive` never emits.
+    #[error(
+        "a requirement id's capability may contain only lowercase letters, digits,          `.` and `-`; found {found:?} at byte {at} of {got:?}"
+    )]
+    DisallowedCharacter {
+        /// The readable half as it arrived.
+        got: String,
+        /// Byte offset of the offending character within the readable half.
+        at: usize,
+        /// The offending character.
+        found: char,
+    },
+}
+
+impl RequirementId {
+    /// Derive the identifier for a *(capability × scope)* pair.
+    ///
+    /// The same pair derives to the same identifier in every process and every
+    /// run, and — because [`RequirementScope`] is a pair of sets — in every
+    /// order the planner happened to union its inputs in.
+    ///
+    /// The readable half lowercases ASCII and maps everything outside
+    /// `[a-z0-9.-]` to `-`, so the result is always safe to interpolate into a
+    /// job matrix and a command line. That mapping is lossy and deliberately
+    /// so: the digest is taken over the capability *as written*, so two
+    /// capabilities that render alike still get different identifiers. Losing
+    /// the distinction in the readable half costs legibility; losing it in the
+    /// digest would cost a verdict.
+    ///
+    /// # Stability
+    ///
+    /// This function's output is a wire value. It appears in
+    /// [`EvidenceRef::Requirement`](crate::reason::EvidenceRef::Requirement)
+    /// inside every bundle, so changing the encoding invalidates every
+    /// historical escalation reference. `requirement_ids_are_derived.rs` pins a
+    /// golden identifier for exactly that reason.
+    #[must_use]
+    pub fn derive(capability: &CapabilityId, scope: &RequirementScope) -> Self {
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(capability.as_str().as_bytes());
+        hasher.update(&[RECORD_SEPARATOR]);
+        hasher.update(&scope.canonical_bytes());
+        let digest = hasher.finalize().to_hex();
+
+        let readable: String = capability
+            .as_str()
+            .chars()
+            .map(|character| {
+                let lowered = character.to_ascii_lowercase();
+                if is_requirement_capability_char(lowered) {
+                    lowered
+                } else {
+                    '-'
+                }
+            })
+            .collect();
+
+        let mut id = String::with_capacity(
+            REQUIREMENT_PREFIX.len() + readable.len() + 1 + REQUIREMENT_DIGEST_HEX,
+        );
+        id.push_str(REQUIREMENT_PREFIX);
+        id.push_str(&readable);
+        id.push('_');
+        id.push_str(&digest.as_str()[..REQUIREMENT_DIGEST_HEX]);
+        Self(SmolStr::new(id))
+    }
+
+    /// Re-read an identifier that was already derived — a bundle field, a job
+    /// matrix entry, or a `--id` argument.
+    ///
+    /// Deliberately not named `new`: it asserts nothing about derivation.
+    ///
+    /// # What is and is not checked
+    ///
+    /// The *shape* is checked: `req_`, a readable half in `[a-z0-9.-]*`, `_`,
+    /// and exactly 16 lowercase hex characters. Whether that digest is the one
+    /// [`derive`](Self::derive) would have produced cannot be checked here,
+    /// because the scope it was taken over is not in the string — the digest is
+    /// non-invertible on purpose, which is what keeps a bundle from leaking a
+    /// private repository's crate names.
+    ///
+    /// So this is a *filter*, not a proof. It rejects `req_tests-pass_all`,
+    /// which is what a person writes when they are inventing an identifier
+    /// rather than reading one back, and that is the mistake worth catching.
+    ///
+    /// # Errors
+    ///
+    /// The [`RequirementIdError`] naming the first rule that failed.
+    pub fn from_wire(id: impl AsRef<str>) -> Result<Self, RequirementIdError> {
+        let id = id.as_ref();
+        let Some(rest) = id.strip_prefix(REQUIREMENT_PREFIX) else {
+            return Err(RequirementIdError::MissingPrefix { got: id.to_owned() });
+        };
+        let Some((capability, digest)) = rest.rsplit_once('_') else {
+            return Err(RequirementIdError::MissingDigest { got: id.to_owned() });
+        };
+        if digest.len() != REQUIREMENT_DIGEST_HEX
+            || !digest
+                .chars()
+                .all(|character| character.is_ascii_digit() || matches!(character, 'a'..='f'))
+        {
+            return Err(RequirementIdError::MalformedDigest {
+                got: digest.to_owned(),
+            });
+        }
+        for (at, found) in capability.char_indices() {
+            if !is_requirement_capability_char(found) {
+                return Err(RequirementIdError::DisallowedCharacter {
+                    got: capability.to_owned(),
+                    at,
+                    found,
+                });
+            }
+        }
+        Ok(Self(SmolStr::new(id)))
+    }
+}
+
+impl TryFrom<&str> for RequirementId {
+    type Error = RequirementIdError;
+
+    fn try_from(id: &str) -> Result<Self, Self::Error> {
+        Self::from_wire(id)
+    }
+}
+
+impl TryFrom<String> for RequirementId {
+    type Error = RequirementIdError;
+
+    fn try_from(id: String) -> Result<Self, Self::Error> {
+        Self::from_wire(id)
+    }
+}
+
+// Hand-written rather than derived, so the shape check runs on the wire.
+//
+// This is the half of "`derive` is the only derivation path" that a macro arm
+// cannot deliver: `#[derive(Deserialize)]` with `#[serde(transparent)]` accepts
+// any string at all, and a bundle or a plan document is exactly where a
+// hand-invented identifier would arrive from. Routing deserialization through
+// `from_wire` closes the shape hole. It does not — and cannot — close the
+// derivation hole; see `from_wire`.
+impl<'de> Deserialize<'de> for RequirementId {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let raw = SmolStr::deserialize(deserializer)?;
+        Self::from_wire(raw).map_err(serde::de::Error::custom)
+    }
 }
 
 id_newtype! {

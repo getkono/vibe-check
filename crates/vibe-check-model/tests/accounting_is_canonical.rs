@@ -40,6 +40,18 @@ use vibe_check_model::{
     RequirementId, ResolutionState, Resolutions, Tier, UnverifiedReason,
 };
 
+/// A shape-valid requirement identifier from a readable name.
+///
+/// The digest half is fixed filler. These tests are about the *order*
+/// resolutions are accounted in, not about how an identifier is derived, and
+/// real `RequirementId::derive` output would tie every ordering assertion below
+/// to sixteen hex characters no reader can predict. `from_wire` is still the
+/// only way in, so a fixture cannot drift away from the shape the wire accepts.
+fn requirement(name: &str) -> RequirementId {
+    RequirementId::from_wire(format!("req_{name}_0000000000000000"))
+        .expect("a well-formed fixture identifier")
+}
+
 /// The lane a requirement carries, derived from its identifier.
 ///
 /// Derived rather than positional so that the same identifier gets the same
@@ -67,8 +79,8 @@ fn always_escalates() -> CapabilityResolution {
 
 /// Distinct requirement identifiers, in ascending order.
 fn distinct_ids() -> impl Strategy<Value = Vec<RequirementId>> {
-    prop::collection::btree_set("req_[a-z]{1,6}", 2..12)
-        .prop_map(|ids| ids.into_iter().map(RequirementId::new).collect())
+    prop::collection::btree_set("[a-z]{1,6}", 2..12)
+        .prop_map(|names| names.iter().map(|name| requirement(name)).collect())
 }
 
 /// A set of identifiers and the same set in a shuffled order.
@@ -201,11 +213,12 @@ fn the_ledger_serializes() {
     // serializing regresses, the properties above fail on an `expect` in a
     // helper, which says nothing about why; this fails on the actual claim.
     let mut resolutions = Resolutions::new();
-    resolutions.insert(
-        RequirementId::new("req_apple"),
+    let displaced = resolutions.insert(
+        requirement("apple"),
         Enforcement::Enforcing,
         always_escalates(),
     );
+    assert!(displaced.is_none(), "the fixture uses distinct identifiers");
     let mut adjudicators = Adjudicators::new();
     resolutions.account_into(&mut adjudicators);
     let ledger = adjudicators.finish().0.into_adjudication().escalations;
@@ -232,8 +245,8 @@ fn both_ledgers_are_ordered() {
     // than one escalation. A fix that ordered the enforced ledger and forgot the
     // advisory one would pass a single-ledger test.
     let mut resolutions = Resolutions::new();
-    resolutions.insert(
-        RequirementId::new("req_zebra"),
+    let displaced = resolutions.insert(
+        requirement("zebra"),
         Enforcement::Advisory,
         CapabilityResolution::Unverified {
             reason: UnverifiedReason::Inconclusive {
@@ -241,12 +254,13 @@ fn both_ledgers_are_ordered() {
             },
         },
     );
+    assert!(displaced.is_none(), "the fixture uses distinct identifiers");
     // Advisory as declared, but an unknown capability is a fact about the
     // policy, so `account` overrides the lane and this lands in the enforced
     // ledger. Its position there is what proves the override is fed by the same
     // ascending pass rather than by a separate one.
-    resolutions.insert(
-        RequirementId::new("req_mango"),
+    let displaced = resolutions.insert(
+        requirement("mango"),
         Enforcement::Advisory,
         CapabilityResolution::Unverified {
             reason: UnverifiedReason::UnknownCapability {
@@ -254,16 +268,19 @@ fn both_ledgers_are_ordered() {
             },
         },
     );
-    resolutions.insert(
-        RequirementId::new("req_berry"),
+    assert!(displaced.is_none(), "the fixture uses distinct identifiers");
+    let displaced = resolutions.insert(
+        requirement("berry"),
         Enforcement::Advisory,
         always_escalates(),
     );
-    resolutions.insert(
-        RequirementId::new("req_apple"),
+    assert!(displaced.is_none(), "the fixture uses distinct identifiers");
+    let displaced = resolutions.insert(
+        requirement("apple"),
         Enforcement::Enforcing,
         always_escalates(),
     );
+    assert!(displaced.is_none(), "the fixture uses distinct identifiers");
 
     let mut adjudicators = Adjudicators::new();
     resolutions.account_into(&mut adjudicators);
@@ -272,18 +289,12 @@ fn both_ledgers_are_ordered() {
 
     assert_eq!(
         requirements(&enforced.escalations),
-        [
-            &RequirementId::new("req_apple"),
-            &RequirementId::new("req_mango"),
-        ],
+        [&requirement("apple"), &requirement("mango"),],
         "the enforced ledger, including the policy-integrity override, ascends"
     );
     assert_eq!(
         requirements(advisory.escalations()),
-        [
-            &RequirementId::new("req_berry"),
-            &RequirementId::new("req_zebra"),
-        ],
+        [&requirement("berry"), &requirement("zebra"),],
         "and so does the advisory one"
     );
     assert_eq!(enforced.tier, Tier::TOP);
@@ -293,7 +304,7 @@ fn both_ledgers_are_ordered() {
     // reached the final tier, not whichever resolution finished first.
     assert_eq!(
         enforced.primary_cause().map(|e| &e.evidence),
-        Some(&EvidenceRef::Requirement(RequirementId::new("req_apple"))),
+        Some(&EvidenceRef::Requirement(requirement("apple"))),
     );
 }
 
@@ -307,14 +318,14 @@ fn a_duplicate_requirement_is_visible() {
     assert!(
         resolutions
             .insert(
-                RequirementId::new("req_tests-pass_all"),
+                requirement("tests-pass"),
                 Enforcement::Enforcing,
                 always_escalates(),
             )
             .is_none()
     );
     let displaced = resolutions.insert(
-        RequirementId::new("req_tests-pass_all"),
+        requirement("tests-pass"),
         Enforcement::Advisory,
         CapabilityResolution::Unverified {
             reason: UnverifiedReason::NoForge,
@@ -334,14 +345,15 @@ fn the_tally_and_the_ledger_read_the_same_map() {
     // from one collection. Assembled separately they can disagree, and a comment
     // that says "4 requirements" above five escalations is a comment nobody can
     // reconcile.
-    let ids = ["req_apple", "req_berry", "req_mango"].map(RequirementId::new);
+    let ids = ["apple", "berry", "mango"].map(requirement);
     let mut resolutions = Resolutions::new();
     for requirement in &ids {
-        resolutions.insert(
+        let displaced = resolutions.insert(
             requirement.clone(),
             lane_for(requirement),
             always_escalates(),
         );
+        assert!(displaced.is_none(), "the fixture uses distinct identifiers");
     }
     assert!(!resolutions.is_empty());
 

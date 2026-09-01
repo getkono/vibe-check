@@ -15,6 +15,15 @@ publish     = false
 # git, no HTTP — those live in `vibe-check-host`.
 [dependencies]
 serde      = { workspace = true }
+# The one addition this list has earned. `RequirementId::derive` digests a
+# capability and its canonicalized scope, and that derivation has to live beside
+# the type it names: a requirement identifier computed in one crate and re-read
+# in another must be the same string, and the only way to guarantee that is for
+# there to be one implementation. Digesting is not I/O — it is a pure function of
+# bytes this crate already owns — so it does not breach the no-I/O rule, and
+# `vibe-check`'s registry digest already uses the same algorithm, so the
+# workspace hashes with one primitive rather than two.
+blake3     = { workspace = true }
 serde_json = { workspace = true }
 smol_str   = { workspace = true }
 camino     = { workspace = true }
