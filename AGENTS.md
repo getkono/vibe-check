@@ -25,9 +25,9 @@ Where an invariant is enforced by a **test** rather than by a type, this file
 says so. That distinction is load-bearing: it tells you whether the compiler
 will stop you or whether only `mise run test` will. Where nothing enforces an
 invariant yet, this file says "not yet enforced" and names where enforcement
-will land. Three such gaps exist today — §5 and §6 — and are listed as gaps,
-not as promises. The unwritten `README.md` above is a fourth, of a different
-kind: a documentation gap rather than an unenforced invariant.
+will land. Four such gaps exist today — two in §5, two in §6 — and are listed
+as gaps, not as promises. The unwritten `README.md` above is a fifth, of a
+different kind: a documentation gap rather than an unenforced invariant.
 
 ## 1. The workspace
 
@@ -165,6 +165,19 @@ why. The bundle half is enforced in `crates/vibe-check-model/src/bundle.rs` by
 `#[serde(flatten)] extensions` on `EvidenceBundle`, with a round-trip test
 asserting that a section this build predates is not dropped on rewrite.
 
+**The bundle half holds at the top level only, which is the section's second
+gap.**
+`EvidenceBundle` is the one type with a bag. `BundleCore`, `Generator`,
+`Adjudication`, `Escalation`, `Confidence`, `Provenance`, `EvidenceRef` and
+`Location` have neither a bag nor `deny_unknown_fields`, so serde drops an
+unknown key inside any of them on read — and since `bundle_id` is computed from
+what was read, two documents differing only below the root are one artifact as
+far as it is concerned. Nested extension bags are #28. Do not close this by
+giving `BundleCore` a flattened field: that adds a field to the permanently
+frozen vocabulary, which §1 forbids. The loss is asserted deliberately in
+`crates/vibe-check-model/tests/golden_digest.rs`, so it is recorded rather than
+believed to be absent.
+
 **The policy half is not yet enforced anywhere.** There is no policy reader in
 this workspace and `#[serde(deny_unknown_fields)]` appears nowhere in it. The
 implementer who writes the policy types owns putting `deny_unknown_fields` on
@@ -222,13 +235,16 @@ held to our own standard.
 Two gaps, stated plainly:
 
 - **The replay-corpus test does not exist.** `clippy.toml` describes it as "the
-  real guarantee". `verdict_digest` and `bundle_id` are now computed —
-  `crates/vibe-check-model/src/digest.rs`, over RFC 8785 canonical JSON — but
-  nothing calls them: no code writes a bundle, no golden bundle is committed,
-  and `vibe-check replay` is declared in `crates/vibe-check/src/cli.rs` and
+  real guarantee". `verdict_digest` and `bundle_id` are now computed
+  (`crates/vibe-check-model/src/digest.rs`, over RFC 8785 canonical JSON) and
+  one golden bundle is committed with both its digests
+  (`crates/vibe-check-model/tests/golden/bundle.json`), so a canonicalization
+  change fails visibly. What is still missing is the corpus: nothing in the
+  workspace *writes* a bundle, one document is not a population, and
+  `vibe-check replay` is declared in `crates/vibe-check/src/cli.rs` and
   unimplemented. Enforcement lands with the milestone that writes the first
-  bundle; until then determinism rests on the lints, the proptests, and
-  `digest.rs`'s own tests.
+  bundle; until then determinism rests on the lints, the proptests, and that
+  single golden.
 - **The `fs` wrapper does not exist.** `clippy.toml` tells you to use it instead
   of `std::fs::read_dir`, and there is no such module. Whoever needs the first
   directory walk owns writing it — in `vibe-check-host`, alongside the other

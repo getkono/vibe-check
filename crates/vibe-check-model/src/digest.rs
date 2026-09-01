@@ -26,9 +26,31 @@
 //!
 //! **`bundle_id` is an exclusion list.** It is a content address of the
 //! artifact, not of the decision, and nobody replays against it, so covering
-//! everything by default is right: a field nobody thought about should change
+//! everything by default is right: a section nobody thought about should change
 //! the identity of the document that carries it. [`BUNDLE_ID_EXCLUDED_PATHS`]
 //! holds the few paths that must not participate.
+//!
+//! ## `bundle_id` addresses the top-level sections, and only those
+//!
+//! "Everything by default" is true at the root and false below it, and the
+//! difference is worth stating because the wrong model is the comfortable one.
+//! [`EvidenceBundle`] carries `#[serde(flatten)] extensions`, so a *section* a
+//! newer build wrote — `perf`, say — survives a read and changes the id.
+//! Nothing nested does. `BundleCore`, `Generator`, `Adjudication`,
+//! `Escalation`, `Confidence`, `Provenance`, `EvidenceRef` and `Location` have
+//! neither a bag nor `deny_unknown_fields`, so serde drops an unknown key
+//! inside any of them on read, and the id is computed from what was read. A
+//! document with `core.evaluated_at` and one without get the same `bundle_id`.
+//!
+//! That also narrows `AGENTS.md` §5, which says unknown keys in bundles are
+//! *preserved* because dropping a field an older reader does not understand
+//! corrupts the record. Preserved, today, means preserved at the top level.
+//! Nested extension bags are #28's subject and the fix belongs there, not here:
+//! giving `BundleCore` a flattened bag would add a field to the permanently
+//! frozen vocabulary, which is the one thing §1 forbids outright. The loss is
+//! asserted deliberately in `tests/golden_digest.rs` rather than left for the
+//! next reader to discover, because a guarantee that holds only at the root
+//! reads exactly like one that holds everywhere.
 //!
 //! # What is *not* on the inclusion list yet
 //!
@@ -108,6 +130,15 @@ pub struct DigestPath {
     /// which is correct for an optional field (`core/pr`) and is a silent
     /// narrowing for a renamed one — see the module documentation for the test
     /// that separates the two.
+    ///
+    /// A path may not *end* in `[]` on an exclusion list. "Exclude every
+    /// element of this array" and "exclude the array" are different documents
+    /// and the syntax cannot say which, so the segment has no defined meaning
+    /// in final position and `prune` would remove nothing — a no-op exclusion
+    /// that fails open with nothing to notice it. The ban is asserted by
+    /// `no_exclusion_path_ends_in_an_array_segment`. On an inclusion list a
+    /// trailing `[]` is merely redundant with the path above it, and the
+    /// prefix test rules that pair out.
     pub path: &'static str,
     /// Why this path is on this list. Not decoration: an entry whose reason
     /// cannot be written is an entry somebody added because a test failed.
@@ -276,6 +307,32 @@ pub const VERDICT_DIGEST_PATHS: &[DigestPath] = &[
 /// live entry stays resolvable and a rename cannot narrow the digest in silence.
 /// Moving an entry here into the live list is the deliberate act the inclusion
 /// list exists to require.
+///
+/// # These rows cannot graduate unchanged, and that is decided here
+///
+/// [`Provenance`](crate::evidence::Provenance) is internally tagged, so its
+/// variants' fields sit directly in the `provenance` object and these path
+/// shapes are right. What is *not* right is the assumption that any of them is
+/// always there. `produced_from_commit` and `sha256` exist only on `Adopted`;
+/// `plan_digest`, `exit_code` and `toolchain` only on `Executed`; `Declared`
+/// has none of them. Five of the six rows below are therefore absent from some
+/// evidence entry in any bundle that mixes provenances, which is every
+/// interesting bundle.
+///
+/// The rule this crate commits to, so that whoever writes the evidence section
+/// does not have to relitigate it: **the live list keeps [`path_resolves`]'s
+/// every-element meaning, and a field that cannot be present in every element
+/// is not a single inclusion entry.** Weakening the live check to "somewhere"
+/// instead would be the cheap fix and the wrong one — it is exactly the check
+/// that catches a rename, and a rename that leaves one element matching would
+/// then pass.
+///
+/// That leaves two honest ways to graduate these, and the second is preferred:
+/// teach the path language a variant qualifier, which buys a query language
+/// nobody can test; or give `Provenance` a shape in which the anti-gaming
+/// fields are common to every variant, so one path covers them all. Either is
+/// a change to `evidence.rs`, which is why it belongs to the milestone that
+/// writes the first bundle rather than to this one.
 pub const DEFERRED_VERDICT_DIGEST_PATHS: &[DigestPath] = &[
     DigestPath {
         path: "evidence/[]/provenance/produced_from_commit",
@@ -337,9 +394,21 @@ const MAX_SAFE_INTEGER: i128 = 9_007_199_254_740_991;
 /// [`Generator::registry_digest`](crate::bundle::Generator::registry_digest))
 /// stay `String`, because their names and shapes are the permanent contract and
 /// this type is not.
+/// Reading one back is validated, not transparent: a `Digest` deserialized
+/// from `"probably-fine"` would be a value that renders like a digest, compares
+/// unequal to every real one, and explains nothing about why. Anything that can
+/// be written has to be readable, and the read has to be the same check
+/// [`FromStr`] makes.
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, serde::Serialize)]
 #[serde(transparent)]
 pub struct Digest(SmolStr);
+
+impl<'de> serde::Deserialize<'de> for Digest {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let raw = SmolStr::deserialize(d)?;
+        raw.parse().map_err(serde::de::Error::custom)
+    }
+}
 
 impl Digest {
     /// The algorithm prefix every digest carries.
@@ -412,14 +481,22 @@ impl FromStr for Digest {
 #[derive(Clone, PartialEq, Eq, Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum CanonicalError {
-    /// A non-integer number. See the module documentation for why these are
-    /// refused rather than formatted.
+    /// A number JSON wrote in a form this build reads as a double. See the
+    /// module documentation for why these are refused rather than formatted.
+    ///
+    /// The trigger is the *written form*, not the value: `-0`, `1e10` and `1.0`
+    /// are all integers mathematically and all arrive here, because
+    /// `serde_json` classifies by how the text was written. Saying "non-integer"
+    /// would send a producer that already writes integers looking for a bug it
+    /// does not have.
     #[error(
-        "cannot canonicalize the non-integer number at `{path}`: RFC 8785 \
-         requires ECMAScript shortest-round-trip formatting, which this build \
-         deliberately does not implement. Every typed number in the model is \
-         integral; if this came from an untyped bag (`facts.extra`, \
-         `extensions`), the producer must write an integer or a string"
+        "the number at `{path}` was written in a form this build reads as a \
+         double (a decimal point, an exponent, or a signed zero — the value \
+         may still be a whole number). Canonicalizing it needs ECMAScript \
+         shortest-round-trip formatting, which this build deliberately does \
+         not implement. Every typed number in the model is integral; if this \
+         came from an untyped bag (`facts.extra`, `extensions`), write it as a \
+         bare integer such as `10000000000`, or as a string"
     )]
     Float {
         /// Where in the document, as a slash-separated path from the root.
@@ -739,25 +816,63 @@ fn write_string(out: &mut String, s: &str) {
 
 // --- what the list is checked against ---------------------------------------
 
-/// Whether `path` resolves to at least one value in `value`.
+/// Whether `path` resolves in **every** element of every array it crosses.
 ///
-/// Used by the tests that keep [`VERDICT_DIGEST_PATHS`] honest. Public because
-/// the replay corpus, when it exists, needs to make the same assertion against
-/// a bundle it did not construct.
+/// The question the live inclusion list has to answer: a path that resolves in
+/// three escalations out of five does not cover the ledger, and a digest that
+/// covers three fifths of a ledger is not a digest of the verdict. Used by the
+/// tests that keep [`VERDICT_DIGEST_PATHS`] honest, and public because the
+/// replay corpus, when it exists, must make the same assertion against a bundle
+/// it did not construct.
+///
+/// The strictness has a consequence worth knowing before you add an entry: a
+/// field that exists on only some variants of an enum cannot be a single
+/// inclusion path. See [`DEFERRED_VERDICT_DIGEST_PATHS`], where five of six
+/// rows are in exactly that position.
 #[must_use]
 pub fn path_resolves(value: &Value, path: &str) -> bool {
-    fn walk(v: &Value, segments: &[Segment<'_>]) -> bool {
-        let Some((head, tail)) = segments.split_first() else {
-            return true;
-        };
-        match *head {
-            Segment::Key(key) => v.get(key).is_some_and(|child| walk(child, tail)),
-            Segment::Each => v
-                .as_array()
-                .is_some_and(|items| !items.is_empty() && items.iter().all(|i| walk(i, tail))),
-        }
+    walk(value, &parse_path(path), Quantifier::Every)
+}
+
+/// Whether `path` resolves in **at least one** element of every array it
+/// crosses.
+///
+/// The question the deferred list has to answer, which is a different one:
+/// *has this field appeared on the bundle yet?* Asking [`path_resolves`]
+/// instead would answer "no" forever for any field that is variant-specific,
+/// so the deferred list would never signal that a row is ready to graduate —
+/// and a deferred list that cannot signal graduation is a comment.
+#[must_use]
+pub fn path_resolves_somewhere(value: &Value, path: &str) -> bool {
+    walk(value, &parse_path(path), Quantifier::Any)
+}
+
+/// How an array is treated when a path crosses it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Quantifier {
+    /// Every element must match.
+    Every,
+    /// One is enough.
+    Any,
+}
+
+fn walk(v: &Value, segments: &[Segment<'_>], q: Quantifier) -> bool {
+    let Some((head, tail)) = segments.split_first() else {
+        return true;
+    };
+    match *head {
+        Segment::Key(key) => v.get(key).is_some_and(|child| walk(child, tail, q)),
+        Segment::Each => v.as_array().is_some_and(|items| {
+            // Empty fails under both quantifiers. An empty array satisfies
+            // `all` vacuously, and a path that "resolves" in a list with no
+            // entries tells you nothing about whether the field exists.
+            !items.is_empty()
+                && match q {
+                    Quantifier::Every => items.iter().all(|i| walk(i, tail, q)),
+                    Quantifier::Any => items.iter().any(|i| walk(i, tail, q)),
+                }
+        }),
     }
-    walk(value, &parse_path(path))
 }
 
 /// Assert-friendly view of what the two lists cover, for tests and for the
@@ -780,9 +895,9 @@ mod tests {
     use super::*;
     use crate::adjudicate::{Adjudicators, Enforcement};
     use crate::bundle::{BundleCore, Confidence, Generator};
-    use crate::ids::{CapabilityId, RiskFlagId};
+    use crate::ids::{CapabilityId, CrateId, RequirementId, RiskFlagId, RuleId};
     use crate::location::{LineRange, Location};
-    use crate::reason::{EvidenceRef, ReasonCode};
+    use crate::reason::{EvidenceRef, PolicyRef, ReasonCode};
     use crate::resolution::ResolutionState;
     use crate::schema::SchemaVersion;
     use crate::tier::Tier;
@@ -791,13 +906,12 @@ mod tests {
     /// including the optional ones, so that a path finding nothing is a
     /// rename and not a `None`.
     ///
-    /// `EvidenceRef` is restricted to the unit and struct-shaped variants
-    /// here. The enum is internally tagged today, which cannot serialize a
-    /// newtype variant over a plain string, so `Requirement`, `Capability`,
-    /// `Crate`, `Rule`, and `Path` do not currently round-trip. That is #78's
-    /// to fix, and it is also why no golden digest is committed with this
-    /// change: a digest taken over the pre-#78 wire form would be invalidated
-    /// by a fix that has nothing to do with adjudication.
+    /// Every [`EvidenceRef`] variant appears, across the two ledgers. That is
+    /// worth the extra lines because `escalations[]/evidence` is on the
+    /// inclusion list, so the digest is taken over whatever shape the ref
+    /// serializes to, and a fixture using two of eight shapes would leave six
+    /// of them uncovered by every assertion in this module. `tests/golden/`
+    /// carries the same eight in a committed document.
     fn bundle() -> EvidenceBundle {
         let mut adjudicators = Adjudicators::new();
         adjudicators.route(Enforcement::Enforcing).escalate(
@@ -813,6 +927,47 @@ mod tests {
                         .in_item("kono_core::ring::Ring::push_unchecked"),
                 ],
             },
+        );
+        adjudicators.route(Enforcement::Enforcing).escalate(
+            Tier::T1,
+            ReasonCode::UnknownCapability,
+            "policy names a capability this build does not register",
+            EvidenceRef::Capability(CapabilityId::new("mutants-in-diff-killed")),
+        );
+        adjudicators.route(Enforcement::Enforcing).escalate(
+            Tier::T1,
+            ReasonCode::CapabilityUnverified,
+            "the test binary would not compile",
+            EvidenceRef::Requirement(RequirementId::new("r_9f3c1a")),
+        );
+        adjudicators.route(Enforcement::Enforcing).escalate(
+            Tier::T1,
+            ReasonCode::DeclaredSkip,
+            "policy waives this for generated code",
+            EvidenceRef::Policy(PolicyRef {
+                path: ".vibe-check/policy.toml".into(),
+                kind: "skip".into(),
+                id: "generated-api".into(),
+                blob_sha: Some("a1b2c3".into()),
+            }),
+        );
+        adjudicators.route(Enforcement::Enforcing).escalate(
+            Tier::T1,
+            ReasonCode::UnmatchedPath,
+            "`vendor/thirdparty.rs` matches no rule",
+            EvidenceRef::Path("vendor/thirdparty.rs".into()),
+        );
+        adjudicators.route(Enforcement::Advisory).escalate(
+            Tier::T1,
+            ReasonCode::AdoptionStale,
+            "the adopted artifact predates the merge base",
+            EvidenceRef::Crate(CrateId::new("kono-net")),
+        );
+        adjudicators.route(Enforcement::Advisory).escalate(
+            Tier::T1,
+            ReasonCode::RuleTierAtLeast,
+            "rule `core-unsafe` applies",
+            EvidenceRef::Rule(RuleId::new("core-unsafe")),
         );
         adjudicators.route(Enforcement::Advisory).escalate(
             Tier::T2,
@@ -978,13 +1133,68 @@ mod tests {
     }
 
     #[test]
+    fn the_two_quantifiers_differ_where_it_matters() {
+        // The distinction the deferred check rests on. A field present in one
+        // array element and not another resolves `somewhere` and not
+        // `everywhere`, which is precisely the `Provenance` situation.
+        let mixed =
+            json!({ "evidence": [ { "provenance": { "exit_code": 0 } }, { "provenance": {} } ] });
+        assert!(path_resolves_somewhere(
+            &mixed,
+            "evidence/[]/provenance/exit_code"
+        ));
+        assert!(!path_resolves(&mixed, "evidence/[]/provenance/exit_code"));
+
+        // An empty array resolves under neither. `all` over nothing is
+        // vacuously true, and a path that "resolves" in a list with no entries
+        // says nothing about whether the field exists.
+        let empty = json!({ "evidence": [] });
+        assert!(!path_resolves(&empty, "evidence/[]/provenance/exit_code"));
+        assert!(!path_resolves_somewhere(
+            &empty,
+            "evidence/[]/provenance/exit_code"
+        ));
+    }
+
+    #[test]
+    fn no_exclusion_path_ends_in_an_array_segment() {
+        // `prune` walks to the parent and removes a key. Given a trailing
+        // `[]` it recurses into each element with nothing left to do and
+        // removes nothing — a no-op exclusion that fails open, on the one list
+        // where the default is "covered". Nothing else would notice: the path
+        // still resolves, so the presence check passes.
+        //
+        // Rejected rather than implemented because the segment has no defined
+        // meaning in final position: "exclude every element of this array" and
+        // "exclude the array" are different documents and `[]` cannot say
+        // which. Name the parent key, or name a field under `[]`.
+        for p in BUNDLE_ID_EXCLUDED_PATHS {
+            assert!(
+                !p.path.ends_with("[]"),
+                "`{}` ends in an array segment, which excludes nothing",
+                p.path
+            );
+        }
+    }
+
+    #[test]
     fn no_deferred_path_resolves_yet() {
         // The other half: an entry graduates out of the deferred list when the
         // field exists, and this test is what notices that it does.
+        //
+        // `path_resolves_somewhere`, not `path_resolves`. Five of these six
+        // rows name a field that exists on only one `Provenance` variant, so
+        // under every-element semantics they would stay unresolvable for as
+        // long as any bundle mixes provenances — which is forever. This check
+        // and `every_live_inclusion_path_resolves` would then be mutually
+        // unsatisfiable: the deferred one never signals graduation, and a row
+        // graduated anyway fails the live one, whose only green fix is to
+        // delete the row. Deleting a row narrows the digest, which is the
+        // outcome the deferred list exists to prevent.
         let value = serde_json::to_value(bundle()).expect("serialize");
         for p in DEFERRED_VERDICT_DIGEST_PATHS {
             assert!(
-                !path_resolves(&value, p.path),
+                !path_resolves_somewhere(&value, p.path),
                 "`{}` now exists on the bundle. Move it from \
                  DEFERRED_VERDICT_DIGEST_PATHS into VERDICT_DIGEST_PATHS, \
                  which is the deliberate act the inclusion list exists to \
@@ -1240,6 +1450,58 @@ mod tests {
             format!("blake3:{}", "0".repeat(64))
                 .parse::<Digest>()
                 .is_ok()
+        );
+    }
+
+    #[test]
+    fn a_digest_read_back_from_json_is_validated_not_trusted() {
+        // The asymmetry this closes: a type that serializes and does not
+        // deserialize cannot be read back at all, and one that deserializes
+        // transparently accepts `"probably-fine"` as a digest — a value that
+        // renders like one, compares unequal to every real one, and explains
+        // nothing about why.
+        let d = verdict_digest(&bundle()).expect("digest");
+        let json = serde_json::to_string(&d).expect("serialize");
+        assert_eq!(
+            serde_json::from_str::<Digest>(&json).expect("deserialize"),
+            d
+        );
+
+        let err = serde_json::from_str::<Digest>("\"probably-fine\"")
+            .expect_err("a string that is not a digest must not deserialize");
+        assert!(
+            err.to_string().contains("blake3:"),
+            "the error must say what was expected, got: {err}"
+        );
+        assert!(serde_json::from_str::<Digest>("\"blake3:7c1e\"").is_err());
+    }
+
+    #[test]
+    fn a_whole_number_written_as_a_double_is_refused_and_says_why() {
+        // `-0`, `1e10` and `1.0` are integers mathematically and all land in
+        // serde_json's f64 arm, because the classification is over the written
+        // form. An error saying "non-integer" would send a producer that
+        // already writes integers hunting a bug it does not have.
+        for text in ["-0", "1e10", "1.0"] {
+            let v: Value = serde_json::from_str(&format!("{{\"n\":{text}}}")).expect("parse");
+            let err = canonicalize(&v).expect_err("must refuse");
+            assert!(
+                matches!(err, CanonicalError::Float { .. }),
+                "{text} should be refused as a double"
+            );
+            let msg = err.to_string();
+            assert!(
+                !msg.contains("non-integer"),
+                "the message must name the written form, not the value: {msg}"
+            );
+            assert!(msg.contains("double"), "{msg}");
+        }
+        // The written form is the whole trigger: the same values as bare
+        // integers canonicalize fine.
+        assert_eq!(
+            canonicalize(&serde_json::from_str::<Value>("{\"n\":10000000000}").expect("parse"))
+                .expect("canonicalize"),
+            "{\"n\":10000000000}"
         );
     }
 

@@ -97,6 +97,84 @@ fn the_golden_bundle_survives_a_round_trip_unchanged() {
 }
 
 #[test]
+fn a_top_level_section_from_a_newer_build_reaches_the_bundle_id() {
+    // The half of the guarantee that holds. `EvidenceBundle` carries a
+    // flattened `extensions`, so a section this build has never heard of
+    // survives the read and changes the content address.
+    let mut value: serde_json::Value = serde_json::from_str(GOLDEN).expect("parse");
+    value
+        .as_object_mut()
+        .expect("object")
+        .insert("coverage".into(), serde_json::json!({ "line_pct": 91 }));
+    let b: EvidenceBundle = serde_json::from_value(value).expect("parse");
+
+    assert!(b.extensions.contains_key("coverage"));
+    assert_ne!(
+        bundle_id(&b).expect("digest").as_str(),
+        GOLDEN_BUNDLE_ID,
+        "a section nobody thought about must change the identity of the \
+         document that carries it"
+    );
+}
+
+#[test]
+fn a_nested_key_from_a_newer_build_is_dropped_and_the_bundle_id_does_not_notice() {
+    // The half that does NOT hold, asserted on purpose.
+    //
+    // Only `EvidenceBundle` has a flattened bag. `BundleCore`, `Generator`,
+    // `Adjudication`, `Escalation`, `Confidence`, `Provenance`, `EvidenceRef`
+    // and `Location` have neither a bag nor `deny_unknown_fields`, so serde
+    // drops an unknown key inside any of them on read — and `bundle_id` is
+    // computed from what was read. So `bundle_id` addresses the top-level
+    // sections, not the whole document, and two documents that differ only
+    // below the root are the same artifact as far as it is concerned.
+    //
+    // This test exists so the limit is visible rather than inherited. The test
+    // above it passes while the general claim is false everywhere below the
+    // root, because the golden's own unknown sections happen to sit at the
+    // root — it is scoped exactly where the property holds.
+    //
+    // The fix is nested extension bags, which is #28. It is deliberately NOT
+    // done here: giving `BundleCore` a flattened `extensions` would add a field
+    // to the permanently frozen vocabulary, which is the one change AGENTS.md
+    // §1 forbids outright. It also narrows AGENTS.md §5 — unknown keys in
+    // bundles are preserved *at the top level* — and that narrowing is now
+    // written down in `digest.rs` rather than left as a surprise.
+    //
+    // When #28 lands, this test fails. That is what it is for: change the
+    // assertions to `assert!(present)` and `assert_ne!`, and delete the gap
+    // paragraph in `digest.rs`.
+    let mut value: serde_json::Value = serde_json::from_str(GOLDEN).expect("parse");
+    value["core"]["evaluated_at"] = serde_json::json!("2026-08-31T00:00:00Z");
+    value["generator"]["host"] = serde_json::json!("gha-runner-7");
+    value["confidence"]["future_count"] = serde_json::json!(7);
+    value["adjudication"]["escalations"][0]["future"] = serde_json::json!("x");
+
+    let b: EvidenceBundle = serde_json::from_value(value).expect("parse");
+    let rewritten = serde_json::to_value(&b).expect("serialize");
+
+    assert!(
+        rewritten["core"].get("evaluated_at").is_none(),
+        "if this key now survives, nested bags landed — see #28 and the note \
+         above"
+    );
+    assert!(rewritten["generator"].get("host").is_none());
+    assert!(rewritten["confidence"].get("future_count").is_none());
+    assert!(
+        rewritten["adjudication"]["escalations"][0]
+            .get("future")
+            .is_none()
+    );
+
+    assert_eq!(
+        bundle_id(&b).expect("digest").as_str(),
+        GOLDEN_BUNDLE_ID,
+        "four nested keys a newer build wrote, and the content address of the \
+         artifact is unchanged. Recorded, not endorsed."
+    );
+}
+
+#[test]
 fn the_golden_bundle_populates_every_live_inclusion_path() {
     // A golden whose optional fields are absent digests a smaller document than
     // it appears to, and would still pass the assertions above while covering
@@ -152,27 +230,97 @@ fn a_release_does_not_move_the_golden_verdict_digest() {
     );
 }
 
+/// Overwrite every value `path` reaches in `doc` with `replacement`.
+///
+/// A deliberately independent walker: the point of the test below is that a
+/// path on the exclusion list is *actually* ignored, and reusing the crate's
+/// own projection would let one bug hide another. `[]` fans out over an array;
+/// every other segment is an object key. Returns how many values it changed,
+/// so a path that reached nothing cannot pass for a path that was ignored.
+fn overwrite_at(doc: &mut serde_json::Value, path: &str, replacement: &serde_json::Value) -> usize {
+    fn go(v: &mut serde_json::Value, segs: &[&str], replacement: &serde_json::Value) -> usize {
+        let Some((head, tail)) = segs.split_first() else {
+            *v = replacement.clone();
+            return 1;
+        };
+        if *head == "[]" {
+            return match v.as_array_mut() {
+                Some(items) => items.iter_mut().map(|i| go(i, tail, replacement)).sum(),
+                None => 0,
+            };
+        }
+        match v.get_mut(*head) {
+            Some(child) => go(child, tail, replacement),
+            None => 0,
+        }
+    }
+    let segs: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+    go(doc, &segs, replacement)
+}
+
 #[test]
-fn the_excluded_paths_are_present_in_the_golden_and_still_ignored() {
-    // An exclusion that is not exercised proves nothing. Every path on
-    // `BUNDLE_ID_EXCLUDED_PATHS` must actually be in the document, or the
-    // assertion that `bundle_id` ignores it is vacuous.
-    let value: serde_json::Value = serde_json::from_str(GOLDEN).expect("parse");
+fn every_excluded_path_is_present_in_the_golden_and_provably_ignored() {
+    // The inclusion side is checked generically, one assertion per entry. The
+    // exclusion side used to prove exactly one path — `core.bundle_id` — by
+    // name, which meant a second entry could be added and be a complete no-op
+    // with every test still green. On an exclusion list a no-op entry fails
+    // open: the path stays in the digest while the list says it does not.
+    //
+    // So: for each entry, overwrite what it reaches in the golden and require
+    // the bundle id not to move. `overwrite_at` returns a count, so an entry
+    // whose path reaches nothing fails here rather than passing vacuously.
+    let original: serde_json::Value = serde_json::from_str(GOLDEN).expect("parse");
+
     for p in BUNDLE_ID_EXCLUDED_PATHS {
         assert!(
-            vibe_check_model::digest::path_resolves(&value, p.path),
+            vibe_check_model::digest::path_resolves(&original, p.path),
             "`{}` is excluded from the bundle id but absent from the golden, \
              so nothing proves it is excluded",
             p.path
         );
-    }
 
-    let mut b = golden();
-    b.core.bundle_id = "something else entirely".into();
+        let mut mutated = original.clone();
+        let hits = overwrite_at(
+            &mut mutated,
+            p.path,
+            &serde_json::json!("mutated-by-the-exclusion-test"),
+        );
+        assert!(
+            hits > 0,
+            "`{}` reached no value in the golden, so this iteration proves \
+             nothing. A path ending in `[]` is the usual cause.",
+            p.path
+        );
+
+        let b: EvidenceBundle = serde_json::from_value(mutated).unwrap_or_else(|e| {
+            panic!(
+                "overwriting `{}` produced a document that will not parse: {e}. \
+                 An exclusion path must name a leaf whose value can be \
+                 replaced, not a whole typed subtree.",
+                p.path
+            )
+        });
+        assert_eq!(
+            bundle_id(&b).expect("digest").as_str(),
+            GOLDEN_BUNDLE_ID,
+            "`{}` is on the bundle id exclusion list, and changing it moved \
+             the bundle id anyway",
+            p.path
+        );
+    }
+}
+
+#[test]
+fn the_exclusion_test_would_notice_a_path_that_is_not_excluded() {
+    // The control. Without it, the loop above passes just as happily if
+    // `bundle_id` ignores everything — a canonicalizer that returned a
+    // constant would be green. `core/head_sha` is not on the exclusion list,
+    // so the same mutation must move the id.
+    let mut mutated: serde_json::Value = serde_json::from_str(GOLDEN).expect("parse");
     assert_eq!(
-        bundle_id(&b).expect("digest").as_str(),
-        GOLDEN_BUNDLE_ID,
-        "the golden carries a `core.bundle_id`, so this proves the exclusion \
-         rather than assuming it"
+        overwrite_at(&mut mutated, "core/head_sha", &serde_json::json!("0000")),
+        1
     );
+    let b: EvidenceBundle = serde_json::from_value(mutated).expect("parse");
+    assert_ne!(bundle_id(&b).expect("digest").as_str(), GOLDEN_BUNDLE_ID);
 }
