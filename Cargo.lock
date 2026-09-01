@@ -2309,10 +2309,12 @@ version = "0.1.0"
 dependencies = [
  "camino",
  "jiff",
+ "proc-macro2",
  "proptest",
  "serde",
  "serde_json",
  "smol_str",
+ "syn 2.0.119",
  "thiserror",
 ]
 
