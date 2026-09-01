@@ -46,5 +46,5 @@ pub use forge::{
     ForgeError, ForgeRead, ForgeResult, ForgeWrite, NullForge, PullRequest, RepoId, RunRef,
     RunStatus, WorkflowRun,
 };
-pub use scheduler::{Dispatch, Leaf, Scheduler};
+pub use scheduler::{Dispatch, DuplicateLeafId, Leaf, Leaves, Scheduler};
 pub use vcs::{ChangeKind, FileChange, Vcs, VcsError};
