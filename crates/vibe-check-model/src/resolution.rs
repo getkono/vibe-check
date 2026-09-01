@@ -768,7 +768,7 @@ mod tests {
     use jiff::Timestamp;
 
     fn requirement() -> RequirementId {
-        RequirementId::from_wire("req_tests-pass_0000000000000000")
+        RequirementId::from_wire("req_tests-pass_00000000000000000000000000000000")
             .expect("a well-formed fixture identifier")
     }
 

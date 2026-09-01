@@ -75,11 +75,11 @@ fn the_derivation_is_pinned() {
             &["kono-core"],
             &["crates/kono-core/src/lib.rs"]
         ),
-        "req_tests-pass_42be8fad964a6d73"
+        "req_tests-pass_66626c43fca74f8651acb85de5242717"
     );
     assert_eq!(
         derive("tests-pass", &[], &[]),
-        "req_tests-pass_e096f630363802f0",
+        "req_tests-pass_3a79dc69c36fe3e43c23c08562462051",
         "the whole-repository scope is pinned too — it is the common case"
     );
 }
@@ -93,9 +93,11 @@ fn the_derivation_is_pinned() {
 /// one encoding, which is what makes the goldens above mean something.
 #[test]
 fn the_pinned_values_are_what_the_documented_encoding_produces() {
-    let expected = |bytes: &[u8]| blake3::hash(bytes).to_hex().as_str()[..16].to_owned();
+    let expected = |bytes: &[u8]| blake3::hash(bytes).to_hex().as_str()[..32].to_owned();
 
-    // capability ⧺ RS ⧺ (crates joined by US) ⧺ RS ⧺ (paths joined by US)
+    // len(capability) as eight big-endian bytes ⧺ capability ⧺ RS
+    //   ⧺ (crates joined by US) ⧺ RS ⧺ (paths joined by US).
+    // `tests-pass` is ten bytes, hence the `\x0a`.
     assert_eq!(
         derive(
             "tests-pass",
@@ -104,19 +106,22 @@ fn the_pinned_values_are_what_the_documented_encoding_produces() {
         ),
         format!(
             "req_tests-pass_{}",
-            expected(b"tests-pass\x1ekono-core\x1ecrates/kono-core/src/lib.rs")
+            expected(b"\x00\x00\x00\x00\x00\x00\x00\x0atests-pass\x1ekono-core\x1ecrates/kono-core/src/lib.rs")
         )
     );
     assert_eq!(
         derive("tests-pass", &["a", "b"], &["x", "y"]),
         format!(
             "req_tests-pass_{}",
-            expected(b"tests-pass\x1ea\x1fb\x1ex\x1fy")
+            expected(b"\x00\x00\x00\x00\x00\x00\x00\x0atests-pass\x1ea\x1fb\x1ex\x1fy")
         )
     );
     assert_eq!(
         derive("tests-pass", &[], &[]),
-        format!("req_tests-pass_{}", expected(b"tests-pass\x1e\x1e"))
+        format!(
+            "req_tests-pass_{}",
+            expected(b"\x00\x00\x00\x00\x00\x00\x00\x0atests-pass\x1e\x1e")
+        )
     );
 }
 
@@ -135,9 +140,9 @@ fn the_digest_does_not_inherit_camino_s_path_ordering() {
         derive("tests-pass", &[], &["f-", "f/a"]),
         format!(
             "req_tests-pass_{}",
-            blake3::hash(b"tests-pass\x1e\x1ef-\x1ff/a")
+            blake3::hash(b"\x00\x00\x00\x00\x00\x00\x00\x0atests-pass\x1e\x1ef-\x1ff/a")
                 .to_hex()
-                .as_str()[..16]
+                .as_str()[..32]
                 .to_owned()
         ),
         "byte order puts `f-` first; camino's component-wise order puts `f/a` first"
@@ -157,7 +162,7 @@ fn a_derived_id_has_the_documented_form() {
         .expect("every requirement id starts with `req_`");
     let (capability, digest) = rest.rsplit_once('_').expect("a digest field");
     assert_eq!(capability, "mutants-in-diff-killed");
-    assert_eq!(digest.len(), 16);
+    assert_eq!(digest.len(), 32);
     assert!(
         digest
             .chars()
@@ -276,6 +281,14 @@ fn a_scope_refuses_what_it_cannot_encode_unambiguously() {
         ("/etc/passwd", "absolute"),
         ("a\u{1f}b", "a unit separator"),
         ("a\u{1e}b", "a record separator"),
+        // The two shapes whose meaning depends on the host. `a\b` is one
+        // component on Linux and two on Windows; `c:/x` is two components on
+        // Linux and a drive prefix on Windows. Either would make a scope legal
+        // on one platform and illegal — or differently encoded — on another,
+        // while the digest input is a `/`-joined string everywhere. Rejected on
+        // both, so the acceptance rule matches the encoding.
+        ("a\\b", "a backslash"),
+        ("c:/x", "a drive prefix"),
     ];
     for (path, why) in rejected {
         assert!(

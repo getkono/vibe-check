@@ -205,8 +205,9 @@ id_newtype! {
     ///
     /// # Form
     ///
-    /// `req_<capability>_<16 hex>`, where the hex is the leading 128 bits of
-    /// `blake3(capability ⧺ \u{1e} ⧺ scope.canonical_bytes())`. The capability
+    /// `req_<capability>_<32 hex>`, where the hex is the leading 128 bits of
+    /// `blake3(len(capability) ⧺ capability ⧺ \u{1e} ⧺ scope.canonical_bytes())`,
+    /// the length being eight big-endian bytes. The capability
     /// stays readable because this string is a CI matrix entry and a `--id`
     /// argument, and somebody debugging a fan-out has to be able to see which
     /// question a leaf is answering.
@@ -241,11 +242,29 @@ const REQUIREMENT_PREFIX: &str = "req_";
 
 /// How many hex characters of digest a requirement identifier carries.
 ///
-/// 16 hex characters is 64 bits. Requirement identifiers are compared for
-/// equality within a single run's plan — tens to low thousands of entries — so
-/// the birthday bound is comfortable, and the string has to stay short enough to
-/// read in a CI matrix entry.
-const REQUIREMENT_DIGEST_HEX: usize = 16;
+/// 32 hex characters: the leading 128 bits of the digest.
+///
+/// # Why not 64 bits, which would read better
+///
+/// Because the relevant bound is not the birthday bound. A scope's members are
+/// crate names and repository-relative paths **taken from the pull request's own
+/// diff**, so an attacker picks them. The attack is not "find any two colliding
+/// scopes"; it is "find a scope whose identifier equals the one
+/// `(tests-pass, {crates: {kono-core}})` already derives" — a *second preimage*
+/// against the truncation, mounted by choosing paths.
+///
+/// It pays out, because [`RequirementId`] is the key of
+/// [`Resolutions`](crate::resolution::Resolutions). Two requirements under one
+/// key is one map entry; whichever `insert` lands second displaces the other,
+/// `account_into` then walks one entry where two requirements existed, and the
+/// displaced one's escalation simply never happens. `insert` returns what it
+/// displaced, but no production caller exists yet to look at that, so nothing
+/// catches it today.
+///
+/// 64 bits is not a second-preimage margin. 128 is. The cost is sixteen
+/// characters in a matrix entry, and it is free only until the first bundle is
+/// written — after that the width is as permanent as the derivation itself.
+const REQUIREMENT_DIGEST_HEX: usize = 32;
 
 /// Whether `character` may appear in the readable half of a requirement
 /// identifier.
@@ -274,16 +293,18 @@ pub enum RequirementIdError {
 
     /// Carried no `_` after the prefix, so there was no digest to find.
     #[error(
-        "a requirement id must be `req_<capability>_<{REQUIREMENT_DIGEST_HEX} hex>`;          {got:?} has no digest separator"
+        "a requirement id must be `req_<capability>_<{REQUIREMENT_DIGEST_HEX} hex>`; \
+         {got:?} has no digest separator"
     )]
     MissingDigest {
         /// The value as it arrived.
         got: String,
     },
 
-    /// The trailing field was not exactly 16 lowercase hex characters.
+    /// The trailing field was not exactly 32 lowercase hex characters.
     #[error(
-        "a requirement id's digest must be {REQUIREMENT_DIGEST_HEX} lowercase hex          characters, got {got:?}"
+        "a requirement id's digest must be {REQUIREMENT_DIGEST_HEX} lowercase hex \
+         characters, got {got:?}"
     )]
     MalformedDigest {
         /// The trailing field as it arrived.
@@ -292,7 +313,8 @@ pub enum RequirementIdError {
 
     /// The readable half held something `derive` never emits.
     #[error(
-        "a requirement id's capability may contain only lowercase letters, digits,          `.` and `-`; found {found:?} at byte {at} of {got:?}"
+        "a requirement id's capability may contain only lowercase letters, digits, \
+         `.` and `-`; found {found:?} at byte {at} of {got:?}"
     )]
     DisallowedCharacter {
         /// The readable half as it arrived.
@@ -329,6 +351,19 @@ impl RequirementId {
     #[must_use]
     pub fn derive(capability: &CapabilityId, scope: &RequirementScope) -> Self {
         let mut hasher = blake3::Hasher::new();
+        // The capability is length-prefixed; the scope's two sets are separated.
+        // The prefix is not belt-and-braces: `RequirementScope::new` guarantees
+        // its own members are separator-free, but `CapabilityId` is an ordinary
+        // `id_newtype!` whose infallible `new` accepts anything at all, control
+        // characters included, so the capability *can* contain a `\u{1e}`.
+        //
+        // Injectivity would still survive on a rightmost-parse argument — with
+        // only the capability able to hold a separator, the last two `\u{1e}`
+        // are always the field boundaries — but that argument is invisible at
+        // the point where somebody adds a third field or reorders these two,
+        // and it fails silently on a green build when they do. A length prefix
+        // needs no argument and survives the edit.
+        hasher.update(&(capability.as_str().len() as u64).to_be_bytes());
         hasher.update(capability.as_str().as_bytes());
         hasher.update(&[RECORD_SEPARATOR]);
         hasher.update(&scope.canonical_bytes());

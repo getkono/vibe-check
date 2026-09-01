@@ -71,7 +71,7 @@ fn unattributed_keeps_the_bytes_it_already_wrote() {
 /// visible edit to a test rather than a silent change to every bundle.
 #[test]
 fn a_string_payload_is_adjacent_to_its_tag() {
-    const WIRE: &str = "req_tests-pass_0000000000000000";
+    const WIRE: &str = "req_tests-pass_00000000000000000000000000000000";
     let evidence = EvidenceRef::Requirement(
         RequirementId::from_wire(WIRE).expect("a well-formed fixture identifier"),
     );
@@ -176,7 +176,7 @@ fn the_two_encoders_agree_about_policy() {
 #[test]
 fn an_escalation_ledger_reaches_json() {
     let mut resolutions = Resolutions::new();
-    let apple = RequirementId::from_wire("req_apple_0000000000000000")
+    let apple = RequirementId::from_wire("req_apple_00000000000000000000000000000000")
         .expect("a well-formed fixture identifier");
     let displaced = resolutions.insert(
         apple.clone(),

@@ -48,7 +48,7 @@ use vibe_check_model::{
 /// to sixteen hex characters no reader can predict. `from_wire` is still the
 /// only way in, so a fixture cannot drift away from the shape the wire accepts.
 fn requirement(name: &str) -> RequirementId {
-    RequirementId::from_wire(format!("req_{name}_0000000000000000"))
+    RequirementId::from_wire(format!("req_{name}_00000000000000000000000000000000"))
         .expect("a well-formed fixture identifier")
 }
 
