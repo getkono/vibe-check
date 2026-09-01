@@ -1,8 +1,9 @@
 //! The evidence bundle: one JSON document, three renderings.
 //!
-//! The bundle is the product. A pull-request comment, a static HTML artifact,
-//! and `vibe-check.json` are all views of this one value, so they cannot
-//! disagree about what happened.
+//! The bundle is the product. The Actions step summary, `vibe-check.json`, and
+//! human stdout are all views of this one value, so they cannot disagree about
+//! what happened. #12 renders all three from one function; the pull-request
+//! comment is a fourth backend of that same function, not a fourth rendering.
 //!
 //! # The frozen core
 //!

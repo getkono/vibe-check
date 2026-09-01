@@ -13,8 +13,10 @@
 #       vibe-check                          bins + `assembly.rs` registration
 #
 # `vibe-check-engine` must never gain a dependency on a concrete parser,
-# analyzer, capability, probe, forge, or renderer. That prohibition is enforced
-# here, by the absence of the dependency, rather than by review.
+# analyzer, capability, probe, forge, or renderer. The crate does not exist yet,
+# so nothing enforces that today: #56 creates it and asserts the prohibition
+# with a test against `cargo metadata`, in the manner of the guard tests in
+# `crates/vibe-check-model/tests/`.
 [workspace]
 resolver = "3"
 members  = ["crates/*"]
@@ -23,6 +25,10 @@ members  = ["crates/*"]
 version      = "0.1.0"
 edition      = "2024"
 # Edition 2024 needs 1.85, but the `karet-*` dependencies raise the real floor.
+# This number is UNVERIFIED: nothing builds at 1.92, and `rust-toolchain.toml`
+# pins 1.97.1, so the two disagree and no gate notices. Making it true is a
+# maintainer's choice between two different costs — drop the claim to match the
+# pin, or add a CI job that builds at the stated floor — and is unfiled.
 rust-version = "1.92"
 license      = "MIT"
 repository   = "https://github.com/getkono/vibe-check"
@@ -70,8 +76,9 @@ karet-vcs = { version = "0.6.0", default-features = false }
 # neither. Declaring it would buy an unused dependency and a second vocabulary
 # for the same idea.
 #
-# `karet-diff` and `karet-filetype` are pins with no consumer. They return
-# with the ChangeSet work, in the same commit as their first use.
+# `karet-diff` and `karet-filetype` are absent rather than pinned without a
+# consumer. They return with the ChangeSet work (#8), in the same commit as
+# their first use.
 
 # --- foundational -----------------------------------------------------------
 serde      = { version = "1.0.229", features = ["derive"] }
@@ -101,9 +108,10 @@ eyre               = "0.6.12"
 color-eyre         = "0.6.5"
 
 # --- schema / digests -------------------------------------------------------
-# The bundle JSON Schema is GENERATED from the Rust types and committed, with a
-# test asserting the regenerated schema is a superset of the committed one, so
-# the schema can never drift from the parser.
+# Declared ahead of its first use; no crate depends on it yet. #22 generates the
+# bundle JSON Schema from the Rust types, commits it, and adds the test
+# asserting the regenerated schema is a superset of the committed one — which is
+# what will stop the schema drifting from the parser.
 schemars = "1.2.2"
 blake3   = "1.8.6"
 

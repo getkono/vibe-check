@@ -29,7 +29,12 @@ run = "actionlint"
 [tasks.test]
 description = "Run all Rust tests"
 # Hermetic and network-free by design: this runs on the `hk` pre-push hook and
-# must stay fast. Anything slow or networked belongs behind the `e2e` feature.
+# must stay fast. Nothing is gated behind a cargo feature: no crate has a
+# `[features]` table, and `--all-features` — passed here and by `lint` and
+# `lint-fix` — would defeat one anyway. Prefer `#[ignore]` plus a `test-slow`
+# task if a split is ever needed. #16 owns that decision, since M3 produces the
+# first genuinely slow tests; choosing a feature gate instead means all three
+# tasks stop passing `--all-features` in the same commit.
 run = "cargo test --workspace --all-targets --all-features"
 
 [tasks.snapshot-accept]
