@@ -214,7 +214,10 @@ mod tests {
     fn leaf(id: &str, lane: &str) -> Leaf {
         Leaf {
             id: LeafId::new_checked(id).expect("a well-formed fixture leaf id"),
-            requirement: RequirementId::new(format!("req_{id}")),
+            requirement: RequirementId::from_wire(format!(
+                "req_{id}_00000000000000000000000000000000"
+            ))
+            .expect("a well-formed fixture identifier"),
             plan: ProcessPlan::new("cargo", ["check".to_owned()]),
             lane: LaneId::new(lane),
         }
@@ -317,7 +320,10 @@ mod tests {
         // And it is not interchangeable with the requirement or the id, which
         // are their own newtypes over the same underlying string type.
         assert_eq!(leaf.id.as_str(), "miri-core-0");
-        assert_eq!(leaf.requirement.as_str(), "req_miri-core-0");
+        assert_eq!(
+            leaf.requirement.as_str(),
+            "req_miri-core-0_00000000000000000000000000000000"
+        );
     }
 
     #[test]
@@ -368,7 +374,9 @@ mod tests {
         // Two leaves that differ in every other field still collide, because
         // it is the id alone that becomes the artifact-name suffix.
         let mut second = leaf("shared", "heavy");
-        second.requirement = RequirementId::new("something-else");
+        second.requirement =
+            RequirementId::from_wire("req_something-else_00000000000000000000000000000000")
+                .expect("a well-formed fixture identifier");
         second.plan = ProcessPlan::new("miri", ["test".to_owned()]);
         let error = Leaves::new(vec![leaf("shared", "cheap"), second])
             .expect_err("differing elsewhere does not make two ids distinct");
