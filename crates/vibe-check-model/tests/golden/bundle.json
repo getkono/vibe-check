@@ -1,0 +1,158 @@
+{
+  "schema_version": 1,
+  "core": {
+    "bundle_id": "blake3:0000000000000000000000000000000000000000000000000000000000000000",
+    "repo": "getkono/kono",
+    "pr": 412,
+    "head_sha": "9f3c1a77b0e4d2f8a6c5931e7b4d0a28f1c63e95",
+    "base_ref": "master",
+    "merge_base_sha": "1a77b0e49f3cd2f8a6c5931e7b4d0a28f1c63e95",
+    "tier": "t2",
+    "verdict": "human",
+    "advisory_tier": "t2",
+    "flag_ids": [
+      "atomics",
+      "public-api",
+      "unsafe"
+    ],
+    "capability_states": {
+      "api-diff-empty": "skip",
+      "mutants-in-diff-killed": "unverified",
+      "tests-pass": "adopt"
+    },
+    "verdict_digest": "blake3:0000000000000000000000000000000000000000000000000000000000000000"
+  },
+  "generator": {
+    "name": "vibe-check",
+    "version": "0.1.0",
+    "git_sha": "cafebabe00112233445566778899aabbccddeeff",
+    "registry_digest": "blake3:0f22aa19c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e"
+  },
+  "adjudication": {
+    "tier": "t2",
+    "verdict": "human",
+    "escalations": [
+      {
+        "from": "t0",
+        "to": "t1",
+        "reason": "rule-tier-at-least",
+        "detail": "rule `core-unsafe` requires T1",
+        "evidence": {
+          "kind": "rule",
+          "ref": "core-unsafe"
+        }
+      },
+      {
+        "from": "t1",
+        "to": "t1",
+        "reason": "unknown-capability",
+        "detail": "policy requires `mutants-in-diff-killed`, which this build does not register",
+        "evidence": {
+          "kind": "capability",
+          "ref": "mutants-in-diff-killed"
+        }
+      },
+      {
+        "from": "t1",
+        "to": "t2",
+        "reason": "capability-unverified",
+        "detail": "the test binary would not compile for `kono-core`",
+        "evidence": {
+          "kind": "requirement",
+          "ref": "r_9f3c1a"
+        }
+      },
+      {
+        "from": "t2",
+        "to": "t2",
+        "reason": "declared-skip",
+        "detail": "policy waives `api-diff-empty` for generated code",
+        "evidence": {
+          "kind": "policy",
+          "ref": {
+            "path": ".vibe-check/policy.toml",
+            "kind": "skip",
+            "id": "generated-api",
+            "blob_sha": "a1b2c3d4e5f60718"
+          }
+        }
+      },
+      {
+        "from": "t2",
+        "to": "t2",
+        "reason": "unmatched-path",
+        "detail": "`vendor/thirdparty.rs` matches no rule",
+        "evidence": {
+          "kind": "path",
+          "ref": "vendor/thirdparty.rs"
+        }
+      }
+    ]
+  },
+  "advisory_escalations": [
+    {
+      "from": "t0",
+      "to": "t1",
+      "reason": "adoption-stale",
+      "detail": "the adopted artifact predates the merge base",
+      "evidence": {
+        "kind": "crate",
+        "ref": "kono-net"
+      }
+    },
+    {
+      "from": "t1",
+      "to": "t2",
+      "reason": "capability-violated",
+      "detail": "`mutants-in-diff-killed` failed: 3 mutants survived",
+      "evidence": {
+        "kind": "flag",
+        "ref": {
+          "flag": "unsafe",
+          "locations": [
+            {
+              "path": "crates/kono-core/src/ring.rs",
+              "blob_sha": "0f22aa19c3",
+              "lines": {
+                "start": 88,
+                "end": 94
+              },
+              "item": "kono_core::ring::Ring::<T>::push_unchecked"
+            },
+            {
+              "path": "crates/kono-core/src/lib.rs"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "from": "t2",
+      "to": "t2",
+      "reason": "internal-panic",
+      "detail": "the classifier aborted; nothing about this change was measured",
+      "evidence": {
+        "kind": "unattributed"
+      }
+    }
+  ],
+  "confidence": {
+    "requirements": 4,
+    "adopted": 1,
+    "ran": 1,
+    "skipped": 1,
+    "unverified": 1,
+    "partial": 1,
+    "advisory": 1,
+    "capabilities": 3
+  },
+  "perf": {
+    "benchmarks": [
+      {
+        "name": "ring_push",
+        "ns": 412
+      }
+    ]
+  },
+  "written_by_a_newer_build": true
+}
