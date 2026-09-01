@@ -173,8 +173,11 @@ pub const VERDICT_DIGEST_PATHS: &[DigestPath] = &[
     },
     DigestPath {
         path: "core/capability_states",
-        reason: "how each required capability was resolved — the basis for the \
-                 tier",
+        reason: "the least-confident answering method for each capability. A \
+                 lossy collapse over scopes, so it is not the basis for the \
+                 tier — the escalations are — but two evaluations that \
+                 answered the same questions by different methods are not the \
+                 same evaluation",
     },
     // `core/bundle_id` and `core/verdict_digest` are deliberately absent.
     // `verdict_digest` cannot cover itself, and `bundle_id` is derived from
@@ -240,12 +243,17 @@ pub const VERDICT_DIGEST_PATHS: &[DigestPath] = &[
     // enforced counterpart is.
     DigestPath {
         path: "confidence",
-        reason: "how much of the picture we had. Digested whole, including \
-                 counts added later: a misspelled `confidence` key \
-                 deserializes to all-zeros and lands in `extensions`, \
-                 rendering as `0 capabilities`, which reads as `nothing was \
-                 required`. That must not digest equal to a run that really \
-                 required nothing",
+        reason: "how much of the picture we had. Digested whole rather than \
+                 field by field, because `Confidence` is `#[non_exhaustive]` \
+                 and additive by contract: a count added later — `capabilities` \
+                 was — enters the digest with the release that adds it rather \
+                 than waiting for someone to remember this list. This is the \
+                 one place the enumerate-everything rule is relaxed, and it is \
+                 safe because the whole struct is counts. It must be covered: \
+                 a misspelled `confidence` key deserializes to all-zeros and \
+                 lands in `extensions`, rendering as `0 capabilities`, which \
+                 reads as `nothing was required`, and that must not digest \
+                 equal to a run that really required nothing",
     },
     // `generator/version` and `generator/git_sha` are absent: cutting a release
     // must not invalidate the replay corpus.

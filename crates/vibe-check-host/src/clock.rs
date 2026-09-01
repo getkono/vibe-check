@@ -23,8 +23,13 @@
 //! left off it would give two identical evaluations different identifiers. No
 //! such field is on the bundle yet.
 //!
-//! `clippy.toml` bans `SystemTime::now` and `Instant::now` workspace-wide. This
-//! module is the sanctioned exception, which is why it is this small.
+//! `clippy.toml` bans the wall clock workspace-wide: the types `SystemTime` and
+//! `Instant`, which closes `elapsed` and `duration_since` along with `now`, and
+//! the methods `Timestamp::now`, `Zoned::now`, and `TimeZone::system`, the last
+//! because reading the runner's `TZ` can move a civil date by a day. This
+//! module is the sanctioned exception, which is why it is this small: the
+//! single `#[allow]` below is the whole of the workspace's access to the wall
+//! clock.
 
 use jiff::Timestamp;
 
@@ -42,6 +47,13 @@ pub trait Clock: Send + Sync {
 pub struct SystemClock;
 
 impl Clock for SystemClock {
+    // The sanctioned wall-clock read. Everything it produces is display-only and
+    // on the digest's exclusion list, per this module's own doc comment; the
+    // decision clock is `Vcs::committer_date`, carried as `DecisionTime`.
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "the one sanctioned wall-clock read; see this module's doc comment"
+    )]
     fn now(&self) -> Timestamp {
         Timestamp::now()
     }

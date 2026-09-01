@@ -3,7 +3,8 @@
 //! The claim that "verdicts only ever move up in scrutiny" rests on things that
 //! are true of the *source files*, not of any value:
 //!
-//! 1. `escalate` is the only method that can mutate an `Adjudicator`.
+//! 1. Nothing but `escalate` writes `Adjudicator::tier`, and nothing but `new`
+//!    produces an `Adjudicator`.
 //! 2. `adjudicate::accumulator` has no child modules.
 //! 3. `adjudicate::enforcement` has no child modules either, for the same
 //!    reason: `Adjudicators` holds its two ledgers as private fields, and a
@@ -21,283 +22,81 @@
 //! write access to the tier, and nothing in the type system would object.
 //!
 //! None of these is expressible as a type, so they are asserted against the
-//! text. A test that reads source is unusual and worth the oddity here: the
+//! source. A test that reads source is unusual and worth the oddity here: the
 //! alternative is a comment asking reviewers to notice something subtle forever.
 //!
-//! # Two scanning regimes
+//! # The invariant is stated over the syntax tree, not over text
 //!
-//! The guards on `enforcement.rs` prepare their source with
-//! [`without_test_modules`], which excises `#[cfg(test)]` blocks by brace
-//! matching. The older guards on `accumulator.rs` and `known.rs` still use
-//! `non_test_source`, which *truncates* at the first `#[cfg(test)]` and so
-//! cannot see anything written below it. That is a real gap and it belongs to
-//! #35, which owns those two files; widening it here would put this lane's
-//! changes in a file it was not scoped to rewrite. The new guards do not
-//! inherit the gap, because the attack they defend against — a `mod helpers;`
-//! with write access to the private `advisory` field — is written in exactly
-//! the place truncation stops looking.
+//! "Exactly one method takes `&mut self`" was only ever a *proxy* for the real
+//! law, and it was a leaky one. A consuming builder passed every check the text
+//! scanner made:
+//!
+//! ```ignore
+//! pub fn with_tier(mut self, tier: Tier) -> Self
+//! ```
+//!
+//! No `&mut self`, and not one of the four literal escape hatches the old guard
+//! listed — yet it assigns the tier, which is exactly the operation the lattice
+//! forbids. `LocalScheduler::with_concurrency` is already in the tree in that
+//! shape, so it is the pattern someone copies by analogy rather than a
+//! hypothetical. `impl IndexMut` and `impl BorrowMut` slipped past for the same
+//! reason: the guard knew four strings, not the idea behind them.
+//!
+//! So these guards parse the file with `syn` and ask about receivers, return
+//! types, trait paths and visibilities directly. See `tests/common/mod.rs` for
+//! the readers. Parsing also retires the two scanning regimes this file used to
+//! carry — one truncating at the first `#[cfg(test)]`, one excising by brace
+//! matching. A test module is now skipped by its *attribute*, so a `mod
+//! helpers;` written below one is seen like any other, which closes the gap #25
+//! recorded here as owed to #35.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
+mod common;
+
+use common::{Receiver, Vis};
 
 const ACCUMULATOR: &str = include_str!("../src/adjudicate/accumulator.rs");
 const ENFORCEMENT: &str = include_str!("../src/adjudicate/enforcement.rs");
 const KNOWN: &str = include_str!("../src/known.rs");
 const RESOLUTION: &str = include_str!("../src/resolution.rs");
 
-/// Everything before `#[cfg(test)]`, so a module's own tests do not count.
-fn non_test_source(source: &str) -> &str {
-    source
-        .split_once("#[cfg(test)]")
-        .map_or(source, |(before, _)| before)
-}
-
-/// Collapse whitespace, so a signature rustfmt wrapped across several lines
-/// reads the same as one written on a single line.
-fn normalized(source: &str) -> String {
-    source.split_whitespace().collect::<Vec<_>>().join(" ")
-}
-
-/// Drop comment lines.
+/// Traits whose whole purpose is to hand out a writable view of a value.
 ///
-/// The documentation on `Adjudicator` lists the escape hatches it deliberately
-/// does *not* provide — `DerefMut`, `set_tier`, and so on. Scanning raw text
-/// would flag the sentence explaining the rule as a violation of it.
-fn code_only(source: &str) -> String {
-    source
-        .lines()
-        .filter(|line| !line.trim_start().starts_with("//"))
-        .collect::<Vec<_>>()
-        .join("\n")
+/// Matched by the trait's own path rather than by four literal strings, so
+/// `core::ops::DerefMut` and `DerefMut` are the same prohibition and adding a
+/// fifth trait to this list is the only way to extend it.
+const WRITABLE_VIEWS: [&str; 4] = ["DerefMut", "AsMut", "BorrowMut", "IndexMut"];
+
+/// `accumulator.rs`, parsed, with its own tests skipped.
+fn accumulator() -> common::Source {
+    common::read("accumulator.rs", ACCUMULATOR)
 }
 
-/// Names of functions whose parameter list takes `&mut self`.
-fn mutating_method_names(source: &str) -> Vec<String> {
-    normalized(source)
-        .split("fn ")
-        .skip(1)
-        .filter_map(|rest| {
-            let params_end = rest.find(')')?;
-            let (head, params) = rest.split_at(params_end);
-            let _ = params;
-            let name = head.split('(').next()?.trim().to_owned();
-            head.contains("&mut self").then_some(name)
-        })
-        .collect()
+/// `enforcement.rs`, parsed, with its own tests skipped.
+fn enforcement() -> common::Source {
+    common::read("enforcement.rs", ENFORCEMENT)
 }
 
-/// The body of a named struct declaration.
-fn struct_body<'a>(source: &'a str, name: &str) -> &'a str {
-    let needle = format!("pub struct {name} {{");
-    let start = source
-        .find(&needle)
-        .unwrap_or_else(|| panic!("`{name}` must be declared in this file"))
-        + needle.len();
-    let rest = &source[start..];
-    let end = rest.find('}').expect("struct declaration is closed");
-    &rest[..end]
-}
-
-// The scanning helpers below are duplicated from
-// `tests/bundle_core_construction.rs`. Integration tests are separate binaries
-// and cannot share code without a third file, which is outside this change's
-// scope; #35 already owns both files and can lift them into a shared module
-// then. Duplicated and sound beats shared and truncating.
-
-/// The byte index just past a string, raw-string, or character literal
-/// beginning at `at`, or `None` if one does not begin there.
-///
-/// `code_only` removes comments but not literals, and literals carry braces:
-/// `write!(f, "flag:{flag}")`, `find('{')`, and `r#"{"path":"a.rs"}"#` all put a
-/// brace in the source that opens or closes nothing. Counting those would
-/// unbalance the scan.
-fn end_of_literal(source: &str, at: usize) -> Option<usize> {
-    let bytes = source.as_bytes();
-    match bytes.get(at)? {
-        // A raw string: `r"…"`, `r#"…"#`, and so on. No escape processing, so
-        // the terminator is the quote followed by the same number of hashes.
-        b'r' => {
-            let mut hashes = 0usize;
-            let mut index = at + 1;
-            while bytes.get(index) == Some(&b'#') {
-                hashes += 1;
-                index += 1;
-            }
-            if bytes.get(index) != Some(&b'"') {
-                return None;
-            }
-            let terminator = format!("\"{}", "#".repeat(hashes));
-            let body = index + 1;
-            let end = source[body..]
-                .find(&terminator)
-                .unwrap_or_else(|| panic!("unterminated raw string at byte {at}"));
-            Some(body + end + terminator.len())
-        }
-        b'"' => {
-            let mut index = at + 1;
-            while index < bytes.len() {
-                match bytes[index] {
-                    b'\\' => index += 1,
-                    b'"' => return Some(index + 1),
-                    _ => {}
-                }
-                index += 1;
-            }
-            panic!("unterminated string literal at byte {at}")
-        }
-        // `'a` is a lifetime and `'{'` is a character. Tell them apart by
-        // looking for the closing quote where a character literal would put it.
-        b'\'' => [3usize, 4]
-            .into_iter()
-            .find(|width| bytes.get(at + width - 1) == Some(&b'\''))
-            .map(|width| at + width),
-        _ => None,
-    }
-}
-
-/// The byte index of the `}` closing the block that opens at `open`.
-///
-/// Panics on an imbalance rather than reporting one. A scanner that gives up
-/// quietly discards the remainder of the file, and a guard that scanned nothing
-/// passes — which is the silent pass these tests exist to refuse. Loud and
-/// wrong is recoverable; quiet and green is not.
-fn matching_brace(source: &str, open: usize) -> usize {
-    let bytes = source.as_bytes();
-    let mut depth = 0usize;
-    let mut index = open;
-
-    while index < bytes.len() {
-        if let Some(after) = end_of_literal(source, index) {
-            index = after;
-            continue;
-        }
-        match bytes[index] {
-            b'{' => depth += 1,
-            b'}' => {
-                assert!(depth > 0, "unbalanced closing brace at byte {index}");
-                depth -= 1;
-                if depth == 0 {
-                    return index;
-                }
-            }
-            _ => {}
-        }
-        index += 1;
-    }
-
-    panic!("unbalanced braces from byte {open}; this scan cannot be trusted")
-}
-
-/// The source with every `#[cfg(test)]` block excised.
-///
-/// A fixture in a module's own tests is not part of anything anyone links
-/// against, and forbidding them would only push fixtures into shapes that prove
-/// less.
-///
-/// Excised by brace matching rather than by truncating at the first
-/// `#[cfg(test)]`. Truncation leaves everything *below* a test module unscanned,
-/// which is precisely where a second construction site — or a `mod helpers;`, or
-/// a `pub fn route` — would be written by someone working around one of these
-/// guards. Run after `code_only`, so a brace in a comment cannot mislead it.
-fn without_test_modules(source: &str) -> String {
-    let mut out = String::new();
-    let mut cursor = 0usize;
-
-    while let Some(offset) = source[cursor..].find("#[cfg(test)]") {
-        let start = cursor + offset;
-        out.push_str(&source[cursor..start]);
-
-        let open = source[start..]
-            .find('{')
-            .map(|index| start + index)
-            .unwrap_or_else(|| panic!("`#[cfg(test)]` at byte {start} opens no block"));
-        assert!(
-            source[start..open].contains("mod "),
-            "only `#[cfg(test)] mod` blocks are excised; the attribute at byte \
-             {start} guards something else, and excising to the next brace would \
-             silently remove unrelated code"
-        );
-        cursor = matching_brace(source, open) + 1;
-    }
-
-    out.push_str(&source[cursor..]);
-    out
-}
-
-/// Whether the text ending just before a `for` opens an `impl` header.
-fn is_impl_header(before: &str) -> bool {
-    before
-        .rfind("impl")
-        .is_some_and(|at| !before[at..].contains(['{', '}', ';']))
-}
-
-/// The bodies of every `impl` block for `name` — inherent *and* trait.
-///
-/// Trait impls matter as much as inherent ones: `impl Default for BundleCore`
-/// and `impl Default for AdvisoryAdjudication` are both written
-/// `fn default() -> Self { Self { … } }`, which mentions neither the type's name
-/// nor `impl <name> {`.
-fn impl_blocks<'a>(code: &'a str, name: &str) -> Vec<&'a str> {
-    let needle = format!("{name} {{");
-    let mut blocks = Vec::new();
-    let mut cursor = 0usize;
-
-    while let Some(offset) = code[cursor..].find(&needle) {
-        let start = cursor + offset;
-        cursor = start + 1;
-
-        let before = code[..start].trim_end();
-        let inherent = before.ends_with("impl");
-        let of_a_trait = before.strip_suffix("for").is_some_and(is_impl_header);
-        if !inherent && !of_a_trait {
-            continue;
-        }
-
-        let open = start + needle.len() - 1;
-        blocks.push(&code[open + 1..matching_brace(code, open)]);
-    }
-
-    blocks
-}
-
-/// `enforcement.rs`, comments gone and its own tests excised.
-fn enforcement_code() -> String {
-    without_test_modules(&code_only(ENFORCEMENT))
-}
-
-/// `resolution.rs`, prepared the same way.
-///
-/// The excising regime rather than the truncating one, for the reason given
-/// above: `mod tests` is currently the last item in that file, but a second
-/// `pub fn account` written below it would be exactly the workaround this guard
-/// exists to catch, and truncation cannot see there.
-fn resolution_code() -> String {
-    without_test_modules(&code_only(RESOLUTION))
-}
-
-/// Module declarations in already-prepared code.
-fn module_declarations(code: &str) -> Vec<&str> {
-    code.lines()
-        .map(str::trim)
-        .filter(|line| line.starts_with("mod ") || line.starts_with("pub mod "))
-        .collect()
-}
-
-/// Module declarations in a source file, via the truncating helper.
-///
-/// Retained for the `accumulator.rs` and `known.rs` guards only — see the note
-/// on scanning regimes above.
-fn submodules(source: &str) -> Vec<&str> {
-    module_declarations(non_test_source(source))
+/// `resolution.rs`, parsed, with its own tests skipped.
+fn resolution() -> common::Source {
+    common::read("resolution.rs", RESOLUTION)
 }
 
 #[test]
 fn escalate_is_the_only_mutator_on_the_adjudicator() {
-    let mutators = mutating_method_names(non_test_source(ACCUMULATOR));
+    let file = accumulator();
+    let items = file.items();
+    let mutators: Vec<String> = common::functions(items)
+        .into_iter()
+        .filter(|function| function.receiver == Receiver::RefMut)
+        .map(|function| function.path())
+        .collect();
 
     assert_eq!(
         mutators,
-        ["escalate"],
-        "exactly one method may take `&mut self`\n\
+        ["Adjudicator::escalate"],
+        "exactly one method in this file may take `&mut self`\n\
          \n\
          Adding another is how \"scrutiny only rises\" stops being a property of \
          the API and becomes a rule someone has to keep enforcing. If new mutable \
@@ -307,9 +106,72 @@ fn escalate_is_the_only_mutator_on_the_adjudicator() {
 }
 
 #[test]
+fn no_consuming_builder_returns_an_adjudicator() {
+    // The hole the `&mut self` rule could never see. `fn with_tier(mut self,
+    // tier: Tier) -> Self` takes `self` by value, assigns the tier, and hands
+    // back an adjudicator — a *lowering* if `tier` is below the one it started
+    // from, written in the shape of an ergonomic builder.
+    //
+    // `finish(self) -> Adjudication` is the reason this rule is about the return
+    // type and not about the receiver: consuming an adjudicator to produce
+    // something that is not one is exactly how a verdict is meant to be sealed.
+    let file = accumulator();
+    let items = file.items();
+    let builders: Vec<String> = common::functions(items)
+        .into_iter()
+        .filter(|function| {
+            function.owner.as_deref() == Some("Adjudicator")
+                && function.receiver == Receiver::Value
+                && function.returns.as_deref() == Some("Adjudicator")
+        })
+        .map(|function| function.path())
+        .collect();
+
+    assert!(
+        builders.is_empty(),
+        "no method may consume an `Adjudicator` and return another one: \
+         {builders:#?}\n\
+         \n\
+         A consuming builder assigns what `escalate` may only join, and it does \
+         so without taking `&mut self` — which is why the receiver rule alone \
+         was never enough. Express the change as an `escalate` call."
+    );
+}
+
+#[test]
+fn only_new_produces_an_adjudicator() {
+    // The other half of the real law. A second constructor — `from_tier`,
+    // `restored`, `with_ledger` — is an adjudicator that did not start at
+    // `Tier::BOTTOM`, and the lattice argument assumes it did.
+    //
+    // File-local on purpose. Workspace-wide this would flag
+    // `Adjudicators::route` and `Adjudicators::integrity`, which return
+    // `&mut Adjudicator` by design and are the supported way to reach one.
+    let file = accumulator();
+    let items = file.items();
+    let producers: Vec<String> = common::functions(items)
+        .into_iter()
+        .filter(|function| function.returns.as_deref() == Some("Adjudicator"))
+        .map(|function| function.path())
+        .collect();
+
+    assert_eq!(
+        producers,
+        ["Adjudicator::new"],
+        "`Adjudicator::new` must be the only thing in this file that produces an \
+         `Adjudicator`\n\
+         \n\
+         Every claim about the accumulator starts \"an adjudicator begins at \
+         `Tier::BOTTOM`\". A second constructor is a value for which that \
+         sentence is false, and nothing downstream can tell the two apart."
+    );
+}
+
+#[test]
 fn the_accumulator_module_has_no_children() {
     // A child module would inherit access to the private `tier` field.
-    let declarations = submodules(ACCUMULATOR);
+    let file = accumulator();
+    let declarations = common::module_declarations(file.items());
     assert!(
         declarations.is_empty(),
         "`adjudicate::accumulator` must have no submodules, found: {declarations:#?}\n\
@@ -326,15 +188,24 @@ fn the_enforcement_module_has_no_children() {
     // same type. A child module could swap them, or return `&mut self.advisory`
     // from something called `integrity`. Either is a downward operation wearing
     // a different word, and nothing in the type system would object.
-    //
-    // Scanned with the excising helper, not the truncating one: a `mod helpers;`
-    // written *below* `mod tests` would be invisible to truncation, and it would
-    // still have write access to `advisory`.
-    let code = enforcement_code();
-    let declarations = module_declarations(&code);
+    let file = enforcement();
+    let declarations = common::module_declarations(file.items());
     assert!(
         declarations.is_empty(),
         "`adjudicate::enforcement` must have no submodules, found: {declarations:#?}"
+    );
+}
+
+#[test]
+fn the_known_module_has_no_children() {
+    // Same reasoning: a child of `known` could match on the private `Inner` enum
+    // and read an unresolved identifier without escalating, which is the one
+    // thing `Known::get` exists to prevent.
+    let file = common::read("known.rs", KNOWN);
+    let declarations = common::module_declarations(file.items());
+    assert!(
+        declarations.is_empty(),
+        "`known` must have no submodules, found: {declarations:#?}"
     );
 }
 
@@ -349,16 +220,27 @@ fn routing_is_not_public() {
     // With it `pub(crate)`, the only `&mut Adjudicator` obtainable from outside
     // this crate is `integrity()`, which is the enforcing ledger. That is what
     // makes the behavioural tests exhaustive rather than illustrative.
-    let source = enforcement_code();
-    assert!(
-        !source.contains("pub fn route"),
+    let file = enforcement();
+    let items = file.items();
+    let route: Vec<Vis> = common::functions(items)
+        .into_iter()
+        .filter(|function| {
+            function.owner.as_deref() == Some("Adjudicators") && function.name == "route"
+        })
+        .map(|function| function.visibility)
+        .collect();
+
+    assert_eq!(
+        route.len(),
+        1,
+        "sanity check: `Adjudicators::route` should exist, exactly once"
+    );
+    assert_eq!(
+        route[0],
+        Vis::Restricted,
         "`Adjudicators::route` must stay `pub(crate)`; routing belongs to \
          `CapabilityResolution::account`, which applies the policy-integrity \
          override before choosing a lane"
-    );
-    assert!(
-        source.contains("pub(crate) fn route"),
-        "sanity check: the method this test guards should exist"
     );
 }
 
@@ -369,41 +251,155 @@ fn the_advisory_adjudication_yields_no_verdict() {
     // second, more permissive verdict, and a bundle carrying two verdicts is a
     // bundle whose readers will disagree about what happened.
     //
-    // Every impl block, not the first one found: a second inherent impl adding
-    // `pub fn verdict` is as good as the first, and `impl From<AdvisoryAdjudication>
-    // for Adjudication` hands out the same thing under a trait's name.
-    let source = enforcement_code();
-    let blocks = impl_blocks(&source, "AdvisoryAdjudication");
+    // Asked of every function whose `impl` is for `AdvisoryAdjudication`, so a
+    // second inherent impl is covered as well as the first, and of every
+    // conversion *out of* the type — `impl From<AdvisoryAdjudication> for
+    // Adjudication` hands out the same thing under a trait's name, and so do
+    // `TryFrom` and `Into`, which the old text scan could not see at all.
+    let file = enforcement();
+    let items = file.items();
 
-    for block in &blocks {
-        for forbidden in ["fn verdict", "-> Adjudication", "Adjudication {"] {
-            assert!(
-                !block.contains(forbidden),
-                "`AdvisoryAdjudication` must not expose `{forbidden}`; only the \
-                 enforced ledger becomes a verdict, and a bundle carries exactly \
-                 one"
-            );
-        }
-    }
+    let methods = common::functions(items);
+    let advisory: Vec<_> = methods
+        .iter()
+        .filter(|function| function.owner.as_deref() == Some("AdvisoryAdjudication"))
+        .collect();
 
-    // The other direction, which no `impl … for AdvisoryAdjudication` block
-    // contains: a conversion *out of* an advisory ledger into an `Adjudication`
-    // hands a caller the verdict just as effectively, under a trait's name.
+    let leaking: Vec<String> = advisory
+        .iter()
+        .filter(|function| {
+            function.name == "verdict" || function.returns.as_deref() == Some("Adjudication")
+        })
+        .map(|function| function.path())
+        .collect();
     assert!(
-        !source.contains("From<AdvisoryAdjudication>"),
-        "nothing may convert an `AdvisoryAdjudication` into an `Adjudication`; \
-         that type always carries a verdict derived from its tier, and the \
-         advisory tier is not allowed to become one"
+        leaking.is_empty(),
+        "`AdvisoryAdjudication` must expose neither a verdict nor an \
+         `Adjudication`: {leaking:#?}\n\
+         \n\
+         Only the enforced ledger becomes a verdict, and a bundle carries \
+         exactly one."
     );
 
+    let converted: Vec<String> = common::conversions(items)
+        .into_iter()
+        .filter(|conversion| conversion.source == "AdvisoryAdjudication")
+        .map(|conversion| conversion.rendered())
+        .collect();
+    assert!(
+        converted.is_empty(),
+        "nothing may convert an `AdvisoryAdjudication` into anything else: \
+         {converted:#?}\n\
+         \n\
+         `Adjudication` always carries a verdict derived from its tier, and the \
+         advisory tier is not allowed to become one. A conversion is that \
+         promotion with a trait's name on it."
+    );
+
+    assert!(
+        advisory.iter().any(|function| function.name == "tier"),
+        "sanity check: the impl this test scans should have been found, and it \
+         should be the one declaring `tier`"
+    );
+}
+
+#[test]
+fn the_adjudicators_tier_field_is_private() {
+    // Scoped to `Adjudicator` deliberately. `Adjudication` — the finished,
+    // consumed-by-value result — *does* expose `tier` publicly, and that is
+    // fine: it has no mutator at all, so a public field on it cannot be used to
+    // lower anything.
+    let file = accumulator();
+    let items = file.items();
+    let fields = common::struct_fields(items, "Adjudicator");
+
+    let tier = fields
+        .iter()
+        .find(|(name, _)| name == "tier")
+        .expect("sanity check: the field this test guards should exist");
     assert_eq!(
-        blocks.len(),
-        1,
-        "sanity check: the one impl block this test scans should have been found"
+        tier.1,
+        Vis::Inherited,
+        "`Adjudicator::tier` must stay private; a public field can be assigned, \
+         and assignment is exactly the operation the lattice forbids"
     );
+}
+
+#[test]
+fn the_adjudicator_exposes_no_escape_hatches() {
+    let file = accumulator();
+    let items = file.items();
+
+    let views: Vec<String> = common::traits_implemented_for(items, "Adjudicator")
+        .into_iter()
+        .filter(|name| WRITABLE_VIEWS.contains(&name.as_str()))
+        .collect();
     assert!(
-        blocks[0].contains("fn tier"),
-        "sanity check: and it should be the one declaring `tier`"
+        views.is_empty(),
+        "`Adjudicator` must implement none of {WRITABLE_VIEWS:?}, found: \
+         {views:#?}\n\
+         \n\
+         Each of them hands out a `&mut Tier` — or a `&mut Adjudicator` from \
+         which one is reachable — and a tier that can be assigned is a verdict \
+         that can be lowered."
+    );
+
+    // Unscoped by owner, deliberately. The obvious escape hatch is a method,
+    // but `pub fn set_tier(adjudicator: &mut Adjudicator, tier: Tier)` written
+    // beside the type does the same job with no receiver at all — field privacy
+    // is module-scoped, so the assignment is legal from anywhere in this file,
+    // and `escalate_is_the_only_mutator_on_the_adjudicator` cannot see it
+    // because a `&mut Adjudicator` *parameter* is not a `&mut self` receiver.
+    let setters: Vec<String> = common::functions(items)
+        .into_iter()
+        .filter(|function| matches!(function.name.as_str(), "set_tier" | "tier_mut"))
+        .map(|function| function.path())
+        .collect();
+    assert!(
+        setters.is_empty(),
+        "`{setters:?}` would allow a tier to be assigned rather than joined, \
+         which makes lowering a verdict expressible"
+    );
+
+    let borrowers: Vec<String> = common::functions(items)
+        .into_iter()
+        .filter(|function| {
+            function
+                .mutably_borrows
+                .iter()
+                .any(|parameter| parameter == "Adjudicator")
+        })
+        .map(|function| function.path())
+        .collect();
+    assert!(
+        borrowers.is_empty(),
+        "nothing in this file may take a `&mut Adjudicator` as a parameter: \
+         {borrowers:#?}\n\
+         \n\
+         Inside this module a `&mut Adjudicator` is write access to a private \
+         `tier`, and it arrives with no receiver for a rule about receivers to \
+         catch. `escalate` is a method for exactly this reason: the mutation \
+         has to be reachable only through the type's own API."
+    );
+}
+
+#[test]
+fn the_adjudicator_has_no_default() {
+    // `Default` is the escape hatch that does not look like one. It reintroduces
+    // exactly what `new` being the sole constructor is meant to prevent: an
+    // adjudicator conjured in the middle of a function that should have threaded
+    // the real one through, accumulating escalations nobody will ever read.
+    //
+    // Removing the impl trips `clippy::new_without_default`, which is allowed
+    // with its reasoning next to the type. This test is what stops someone
+    // silencing that lint the other way.
+    let file = accumulator();
+    let items = file.items();
+    assert!(
+        !common::traits_implemented_for(items, "Adjudicator").contains(&"Default".to_owned()),
+        "`Adjudicator` must not implement `Default`; the type's own documentation \
+         explains why, and an impl that contradicts its documentation is worse \
+         than either one alone"
     );
 }
 
@@ -420,130 +416,379 @@ fn accounting_is_not_public() {
     // `RequirementId` and offers no second mode. Unordered accounting is not
     // discouraged, it is unnameable.
     //
-    // The trailing `(` in the needle is load-bearing. Without it the same needle
-    // matches `pub fn account_into(`, and the guard would fail on the very API
-    // it exists to protect — the third assertion below is what proves that
-    // claim rather than asserting it in a comment.
-    let source = resolution_code();
-    assert!(
-        !source.contains("pub fn account("),
+    // This used to be a needle whose trailing `(` was load-bearing — without it
+    // the same needle matched `pub fn account_into(` and the guard failed on the
+    // API it exists to protect. Asked of the syntax tree, `account` and
+    // `account_into` are simply two different functions, and the hazard is gone
+    // rather than documented.
+    let file = resolution();
+    let items = file.items();
+    let methods = common::functions(items);
+
+    let account = methods
+        .iter()
+        .find(|function| {
+            function.owner.as_deref() == Some("CapabilityResolution") && function.name == "account"
+        })
+        .expect("sanity check: the method this test guards should exist");
+    assert_eq!(
+        account.visibility,
+        Vis::Restricted,
         "`CapabilityResolution::account` must stay `pub(crate)`; accounting in \
          an order of the caller's choosing is what `Resolutions::account_into` \
          exists to make inexpressible"
     );
-    assert!(
-        source.contains("pub(crate) fn account("),
-        "sanity check: the method this test guards should exist"
-    );
-    assert!(
-        source.contains("pub fn account_into("),
-        "sanity check: the ordered entry point must be public — and a needle \
-         written without the trailing `(` would have matched this very line"
-    );
-}
 
-#[test]
-fn the_known_module_has_no_children() {
-    // Same reasoning: a child of `known` could match on the private `Inner` enum
-    // and read an unresolved identifier without escalating, which is the one
-    // thing `Known::get` exists to prevent.
-    let declarations = submodules(KNOWN);
-    assert!(
-        declarations.is_empty(),
-        "`known` must have no submodules, found: {declarations:#?}"
-    );
-}
-
-#[test]
-fn the_adjudicators_tier_field_is_private() {
-    // Scoped to `Adjudicator` deliberately. `Adjudication` — the finished,
-    // consumed-by-value result — *does* expose `tier` publicly, and that is
-    // fine: it has no mutator at all, so a public field on it cannot be used to
-    // lower anything.
-    let body = struct_body(non_test_source(ACCUMULATOR), "Adjudicator");
-    assert!(
-        !body.contains("pub tier"),
-        "`Adjudicator::tier` must stay private; a public field can be assigned, \
-         and assignment is exactly the operation the lattice forbids"
-    );
-    assert!(
-        body.contains("tier: Tier"),
-        "sanity check: the field this test guards should exist"
-    );
-}
-
-#[test]
-fn the_adjudicator_exposes_no_escape_hatches() {
-    let source = code_only(non_test_source(ACCUMULATOR));
-    for forbidden in ["fn set_tier", "fn tier_mut", "DerefMut", "impl AsMut"] {
-        assert!(
-            !source.contains(forbidden),
-            "`{forbidden}` would allow a tier to be assigned rather than joined, \
-             which makes lowering a verdict expressible"
-        );
-    }
-}
-
-#[test]
-fn the_adjudicator_has_no_default() {
-    // `Default` is the escape hatch that does not look like one. It reintroduces
-    // exactly what `new` being the sole constructor is meant to prevent: an
-    // adjudicator conjured in the middle of a function that should have threaded
-    // the real one through, accumulating escalations nobody will ever read.
-    //
-    // Removing the impl trips `clippy::new_without_default`, which is allowed
-    // with its reasoning next to the type. This test is what stops someone
-    // silencing that lint the other way.
-    let source = code_only(non_test_source(ACCUMULATOR));
-    assert!(
-        !source.contains("impl Default for Adjudicator"),
-        "`Adjudicator` must not implement `Default`; the type's own documentation \
-         explains why, and an impl that contradicts its documentation is worse \
-         than either one alone"
-    );
-}
-
-#[test]
-fn the_excising_scanner_sees_below_a_test_module() {
-    // The reason the enforcement guards do not use `non_test_source`. A child
-    // module written below `mod tests` has exactly the same write access to the
-    // private `advisory` field as one written above it, and truncation cannot
-    // see it at all. This test is what stops the enforcement guards quietly
-    // regressing onto the truncating helper.
-    let sample = r"
-mod above;
-#[cfg(test)]
-mod tests {
-    fn fixture() {}
-}
-mod below;
-";
-
+    let account_into = methods
+        .iter()
+        .find(|function| {
+            function.owner.as_deref() == Some("Resolutions") && function.name == "account_into"
+        })
+        .expect("sanity check: the ordered entry point must exist");
     assert_eq!(
-        submodules(sample),
-        ["mod above;"],
-        "truncation stops at the test module — this is the gap, recorded"
-    );
-    assert_eq!(
-        module_declarations(&without_test_modules(&code_only(sample))),
-        ["mod above;", "mod below;"],
-        "excision sees both, which is why the enforcement guards use it"
+        account_into.visibility,
+        Vis::Public,
+        "sanity check: the ordered entry point must be public, or demoting \
+         `account` would have removed the ability to account at all"
     );
 }
 
+// --- anti-vacuity ----------------------------------------------------------
+//
+// Every guard above is only as good as the reader beneath it, and a reader that
+// silently matched nothing would pass all of them forever. One meta-test per
+// rule, each planting the violation that rule exists to catch.
+
 #[test]
-fn the_signature_scanner_actually_works() {
-    // This file's guarantees are only as good as the parsing above, and a
-    // scanner that silently matches nothing would pass every test here.
-    let sample = r"
-        impl T {
+fn the_receiver_reader_tells_a_consuming_builder_from_a_getter() {
+    let sample = common::read(
+        "sample",
+        r"
+        impl Adjudicator {
+            pub fn new() -> Self { Self {} }
             pub fn read(&self) -> u8 { 0 }
             pub fn write(
                 &mut self,
                 value: u8,
             ) {}
+            pub fn with_tier(mut self, tier: Tier) -> Self { self }
+            pub fn finish(self) -> Adjudication { Adjudication {} }
             fn helper(&mut self) {}
         }
-    ";
-    assert_eq!(mutating_method_names(sample), ["write", "helper"]);
+        ",
+    );
+    let items = sample.items();
+    let read = common::functions(items);
+
+    let mutators: Vec<String> = read
+        .iter()
+        .filter(|function| function.receiver == Receiver::RefMut)
+        .map(|function| function.name.clone())
+        .collect();
+    assert_eq!(
+        mutators,
+        ["write", "helper"],
+        "the reader must see through rustfmt line wrapping, and must not count \
+         `mut self` as a mutable borrow"
+    );
+
+    let builders: Vec<String> = read
+        .iter()
+        .filter(|function| {
+            function.receiver == Receiver::Value
+                && function.returns.as_deref() == Some("Adjudicator")
+        })
+        .map(|function| function.name.clone())
+        .collect();
+    assert_eq!(
+        builders,
+        ["with_tier"],
+        "the consuming builder is the hole this file exists to close, and \
+         `finish` — which consumes one and returns something else — is not it"
+    );
+}
+
+#[test]
+fn the_return_type_reader_resolves_self_to_the_impl() {
+    let sample = common::read(
+        "sample",
+        r"
+        impl Adjudicator {
+            pub fn new() -> Self { Self {} }
+            pub fn restored(ledger: Vec<Escalation>) -> Adjudicator { Adjudicator {} }
+            pub fn maybe() -> Option<Box<Adjudicator>> { None }
+            pub fn tier(&self) -> Tier { self.tier }
+        }
+        ",
+    );
+    let items = sample.items();
+    let producers: Vec<String> = common::functions(items)
+        .into_iter()
+        .filter(|function| function.returns.as_deref() == Some("Adjudicator"))
+        .map(|function| function.name)
+        .collect();
+
+    assert_eq!(
+        producers,
+        ["new", "restored", "maybe"],
+        "`-> Self`, `-> Adjudicator` and `-> Option<Box<Adjudicator>>` are the \
+         same production, and a second constructor written any of those ways \
+         must be seen"
+    );
+}
+
+#[test]
+fn the_trait_reader_sees_a_writable_view_however_it_is_pathed() {
+    let sample = common::read(
+        "sample",
+        r"
+        impl core::ops::DerefMut for Adjudicator {}
+        impl BorrowMut<Tier> for Adjudicator {}
+        impl IndexMut<usize> for Adjudicator {}
+        impl AsMut<Tier> for Adjudicator {}
+        impl Deref for Adjudicator {}
+        impl DerefMut for SomethingElse {}
+        ",
+    );
+    let items = sample.items();
+    let found: Vec<String> = common::traits_implemented_for(items, "Adjudicator")
+        .into_iter()
+        .filter(|name| WRITABLE_VIEWS.contains(&name.as_str()))
+        .collect();
+
+    assert_eq!(
+        found,
+        ["DerefMut", "BorrowMut", "IndexMut", "AsMut"],
+        "all four writable views, matched by trait path rather than by literal \
+         string — and `Deref`, which is read-only, left alone, as is another \
+         type's `DerefMut`"
+    );
+}
+
+#[test]
+fn the_visibility_reader_tells_pub_from_pub_crate() {
+    let sample = common::read(
+        "sample",
+        r"
+        impl CapabilityResolution {
+            pub(crate) fn account(&self) {}
+        }
+        impl Resolutions {
+            pub fn account_into(&self) {}
+        }
+        ",
+    );
+    let items = sample.items();
+    let read = common::functions(items);
+
+    let account = read.iter().find(|f| f.name == "account").unwrap();
+    let account_into = read.iter().find(|f| f.name == "account_into").unwrap();
+
+    assert_eq!(account.visibility, Vis::Restricted);
+    assert_eq!(
+        account_into.visibility,
+        Vis::Public,
+        "the two are different functions to a parser, so the needle whose \
+         trailing `(` used to be load-bearing has nothing left to get wrong"
+    );
+}
+
+#[test]
+fn the_field_reader_tells_a_private_field_from_a_public_one() {
+    let sample = common::read(
+        "sample",
+        r"
+        pub struct Adjudicator {
+            tier: Tier,
+            pub ledger: Vec<Escalation>,
+        }
+        ",
+    );
+    let items = sample.items();
+    assert_eq!(
+        common::struct_fields(items, "Adjudicator"),
+        vec![
+            ("tier".to_owned(), Vis::Inherited),
+            ("ledger".to_owned(), Vis::Public),
+        ]
+    );
+}
+
+#[test]
+fn the_reader_sees_a_module_declared_below_a_test_module() {
+    // The reason this file no longer truncates at the first `#[cfg(test)]`. A
+    // child module written below `mod tests` has exactly the same write access
+    // to a private field as one written above it, and truncation could not see
+    // it at all.
+    let sample = common::read(
+        "sample",
+        r"
+mod above;
+#[cfg(test)]
+mod tests {
+    mod fixture;
+}
+mod below;
+",
+    );
+
+    assert_eq!(
+        common::module_declarations(sample.items()),
+        ["above", "below"],
+        "both real children, and neither the test module nor anything inside it"
+    );
+}
+
+#[test]
+fn the_conversion_reader_sees_every_spelling_out_of_the_advisory_ledger() {
+    let sample = common::read(
+        "sample",
+        r"
+        impl From<AdvisoryAdjudication> for Adjudication {}
+        impl TryFrom<AdvisoryAdjudication> for Adjudication {}
+        impl Into<Adjudication> for AdvisoryAdjudication {}
+        impl From<EnforcedAdjudication> for Adjudication {}
+        ",
+    );
+    let items = sample.items();
+    let out: Vec<String> = common::conversions(items)
+        .into_iter()
+        .filter(|conversion| conversion.source == "AdvisoryAdjudication")
+        .map(|conversion| conversion.via)
+        .collect();
+
+    assert_eq!(
+        out,
+        ["From", "TryFrom", "Into"],
+        "`Into` reverses the two types and `TryFrom` was invisible to a scan for \
+         `From<AdvisoryAdjudication>`; the enforced ledger's conversion is not \
+         this rule's business"
+    );
+}
+
+#[test]
+fn the_reader_tells_a_test_gate_from_its_negation() {
+    // "Does the `cfg` mention `test`" also matched `not(test)`, which is the
+    // form that ships — so a `mod helpers;` or an `impl Default` behind it was
+    // dropped from every guard in this file without a word.
+    let sample = common::read(
+        "sample",
+        r#"
+#[cfg(not(test))]
+mod ships;
+#[cfg(test)]
+mod fixtures;
+#[cfg(all(test, feature = "e2e"))]
+mod slow;
+#[cfg(any(test, unix))]
+mod platform;
+#[cfg(feature = "e2e")]
+mod gated;
+"#,
+    );
+
+    assert_eq!(
+        common::module_declarations(sample.items()),
+        ["ships", "platform", "gated"],
+        "`not(test)` and `any(test, unix)` both ship; `test` and \
+         `all(test, …)` do not"
+    );
+}
+
+#[test]
+fn a_free_function_taking_a_mutable_adjudicator_is_an_escape_hatch() {
+    // The hole scoping the escape-hatch rule to methods opened. Field privacy
+    // is module-scoped, so this assigns `tier` legally — and it has no
+    // receiver, so the `&mut self` rule cannot see it either.
+    let sample = common::read(
+        "sample",
+        r"
+        pub fn set_tier(adjudicator: &mut Adjudicator, tier: Tier) {
+            adjudicator.tier = tier;
+        }
+        pub fn inspect(adjudicator: &Adjudicator) -> Tier {
+            adjudicator.tier
+        }
+        impl Adjudicator {
+            pub fn escalate(&mut self, at_least: Tier) {}
+        }
+        ",
+    );
+    let read = common::functions(sample.items());
+
+    assert_eq!(
+        read.iter()
+            .filter(|function| function.mutably_borrows.iter().any(|p| p == "Adjudicator"))
+            .map(|function| function.name.clone())
+            .collect::<Vec<_>>(),
+        ["set_tier"],
+        "the mutable borrow, and neither the shared one nor the receiver"
+    );
+    assert_eq!(
+        read.iter()
+            .filter(|function| function.receiver == Receiver::RefMut)
+            .map(|function| function.name.clone())
+            .collect::<Vec<_>>(),
+        ["escalate"],
+        "and the receiver rule genuinely cannot see the free function, which \
+         is why both are asserted"
+    );
+}
+
+#[test]
+fn the_trait_reader_sees_a_derive() {
+    // `#[derive(Default)]` and `impl Default for Adjudicator` produce the same
+    // public `Adjudicator::default()`, and the derive is the more idiomatic of
+    // the two. A rule that only knew the impl was a rule about spelling.
+    let sample = common::read(
+        "sample",
+        r"
+        #[derive(Debug, Default)]
+        pub struct Adjudicator {
+            tier: Tier,
+        }
+        #[derive(Clone)]
+        pub struct Adjudication {}
+        ",
+    );
+    let traits = common::traits_implemented_for(sample.items(), "Adjudicator");
+
+    assert_eq!(traits, ["Debug", "Default"]);
+    assert!(
+        !common::traits_implemented_for(sample.items(), "Adjudication")
+            .contains(&"Default".to_owned()),
+        "and one type's derive list is not another's"
+    );
+}
+
+#[test]
+fn an_item_inside_a_const_block_is_read() {
+    // `const _: () = { … };` registers an impl globally while sitting inside an
+    // initialiser, where a walk over modules alone never looks.
+    let sample = common::read(
+        "sample",
+        r"
+        const _: () = {
+            impl core::ops::DerefMut for Adjudicator {}
+            mod helpers {}
+        };
+        ",
+    );
+
+    assert!(
+        common::traits_implemented_for(sample.items(), "Adjudicator")
+            .contains(&"DerefMut".to_owned())
+    );
+    assert_eq!(common::module_declarations(sample.items()), ["helpers"]);
+}
+
+#[test]
+#[should_panic(expected = "cannot classify")]
+fn a_cfg_this_reader_cannot_classify_is_a_loud_failure() {
+    // The other half of the `cfg` fix, and the half that is easy to leave
+    // decorative. Assuming an unreadable gate is test-only is how an item
+    // vanishes from a guard in silence; assuming it ships would be a guard that
+    // fails for reasons nobody can act on. Neither is a guess worth making, so
+    // the reader stops instead — and this is what proves it actually does.
+    let _ = common::read("sample", "#[cfg(1 + 1)]\nmod helpers {}\n");
 }
