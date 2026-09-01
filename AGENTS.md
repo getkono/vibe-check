@@ -213,8 +213,8 @@ One gap, and one non-gap, stated plainly:
   `std::fs::read_dir`; the three tests that walk a directory
   (`no_evidence_from_status.rs`, `bundle_core_construction.rs`,
   `no_key_parser_or_tui_in_the_tree.rs`) call `camino::Utf8Path::read_dir_utf8`
-  and sort the entries themselves, so none of them allows the lint. If a caller
-  ever wants that collect-and-sort factored out, it belongs in
+  and sort the collected paths in the caller, so none of them allows the lint.
+  If a caller ever wants that collect-and-sort factored out, it belongs in
   `vibe-check-host`, alongside the other side-effect ports — but a module for
   zero callers is the same disease this section is about.
 
