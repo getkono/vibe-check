@@ -18,16 +18,18 @@ disagree, the module doc wins and this file is the bug.
 User-facing framing — what vibe-check is for, how to adopt it, how to install
 it, what the exit codes mean to a caller — is `README.md`'s job and is
 deliberately absent here. That split is a contract about ownership, not a
-description of what is written today: `README.md` is currently three lines and
-carries none of it. #14 is the issue that fills it in.
+description of what is written today, and the two have only just converged:
+`README.md` carried none of it until #14, and now carries all of it. Adding
+user-facing framing to this file is the way that split gets lost.
 
 Where an invariant is enforced by a **test** rather than by a type, this file
 says so. That distinction is load-bearing: it tells you whether the compiler
 will stop you or whether only `mise run test` will. Where nothing enforces an
 invariant yet, this file says "not yet enforced" and names where enforcement
 will land. Three such gaps exist today — two in §5, one in §6 — and are listed
-as gaps, not as promises. The unwritten `README.md` above is a fourth, of a
-different kind: a documentation gap rather than an unenforced invariant.
+as gaps, not as promises. A fourth, of a different kind, closed with #14: the
+unwritten `README.md` was a documentation gap rather than an unenforced
+invariant.
 
 ## 1. The workspace
 
@@ -350,7 +352,7 @@ Standing rules:
   code too, and says why in its own docs.
 - The exit-code contract lives in `crates/vibe-check/src/exit.rs`, next to the
   tier it derives from. Do not restate the table anywhere else — `README.md`
-  owns the user-facing version, and does not carry it yet (#14).
+  owns the user-facing version, and carries it (#14).
 
 Tests run hermetically and without network access, because they run on the
 pre-push hook. No crate has a `[features]` table, and `lint`, `lint-fix` and
