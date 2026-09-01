@@ -33,19 +33,42 @@
 //!    skips the negation — which is the form that ships. [`ships`] evaluates the
 //!    predicate instead, with `test` off, so `cfg(test)` is dropped and
 //!    `cfg(not(test))` is kept.
-//! 2. **Item bodies.** `const _: () = { impl From<String> for Evidence {…} };`
+//! 2. **`#[cfg(not(<anything else>))]`.** Evaluating the predicate is only
+//!    enough while the evaluation is honest about what it does not know.
+//!    Recording an unevaluable leaf as "conservatively satisfied" made
+//!    `not(target_os = "windows")` — which is how portable code is written —
+//!    come out false, and every item behind one left the walk. [`Cfg::holds`]
+//!    is three-valued so that unknown survives a negation, and the
+//!    conservative reading happens once, in [`ships`].
+//! 3. **Item bodies.** `const _: () = { impl From<String> for Evidence {…} };`
 //!    registers that impl globally, and it is nested inside a `const`
 //!    initialiser rather than at the top level of a file. The walk descends into
 //!    every body, not only into modules.
-//! 3. **Macro bodies.** `syn` hands a `macro_rules!` definition back as opaque
+//! 4. **Macro bodies.** `syn` hands a `macro_rules!` definition back as opaque
 //!    tokens, so an `impl` written inside one is invisible — while the old text
 //!    scan could still see it, which made a naive parse a *regression*. The
 //!    expansions are re-parsed here, with metavariables substituted for plain
 //!    identifiers, and an expansion that cannot be parsed at all is a loud
 //!    failure rather than a silent skip.
+//! 5. **Macro invocations.** Substituting a placeholder answers the wrong
+//!    question when the metavariable stands where the rule keys:
+//!    `impl From<$src> for $dst` re-parses to a target no rule names, and the
+//!    real name is written only at the invocation — which `syn` also hands
+//!    back as opaque tokens. So the invocations' arguments are collected,
+//!    pooled across the workspace, and substituted in as well. See
+//!    [`substitute`].
+//! 6. **A written name is not a type.** Every rule here keys on an identifier,
+//!    and a type alias, a tuple and an associated type are three ways to hand
+//!    back the forbidden value while writing a different one. The first two are
+//!    resolved — see [`resolve_alias`] for exactly how far, and for what is
+//!    deliberately left alone.
 //!
 //! A guard that stops catching something silently is worse than no guard: the
-//! green is what a reviewer trusts.
+//! green is what a reviewer trusts. The corollary is that a guard which fails
+//! loudly for a reason nobody can act on gets deleted, which is the same
+//! outcome by a slower route — so the loud failures are kept narrow: the reader
+//! stops on what it cannot place *and* that could hold an item, and passes over
+//! the legal shapes that hold nothing.
 //!
 //! # Integration tests cannot share code without a directory
 //!
@@ -1008,6 +1031,18 @@ impl ItemWalk {
             }));
             return true;
         }
+        // A match arm is the one declaration-free position with an expression
+        // inside it, and an expression is where a struct literal lives. Keeping
+        // the bodies is what stops `($p:pat) => { $p => BundleCore { … } }`
+        // from being recognised and then thrown away.
+        if let Ok(arms) = syn::parse::Parser::parse2(
+            syn::punctuated::Punctuated::<syn::Arm, syn::Token![,]>::parse_terminated,
+            tokens.clone(),
+        ) {
+            self.macro_exprs
+                .extend(arms.into_iter().map(|arm| *arm.body));
+            return true;
+        }
         parses_as_a_position_that_declares_nothing(tokens)
     }
 }
@@ -1016,9 +1051,11 @@ impl ItemWalk {
 /// cannot declare an item.
 ///
 /// A macro may legally expand into far more than items, expressions and blocks:
-/// a type, a struct's fields, an enum's variants, a match arm, a where-clause
-/// predicate, a pattern, a bound. None of those can carry an `impl`, a `fn` or
-/// a `struct`, so there is nothing in them for these guards to find — but a
+/// a type, a struct's fields, an enum's variants, a where-clause predicate, a
+/// pattern, a bound. None of those can carry an `impl`, a `fn` or a `struct`,
+/// so there is nothing in them for these guards to find — match arms are
+/// handled by [`ItemWalk::absorb`] itself, because an arm's body is an
+/// expression and an expression can construct something. But a
 /// reader that could not parse them at all panicked on legal source, and the
 /// panic surfaced on whichever guard binary happened to read the file. Being
 /// able to *name* the position is what turns "I cannot read this" into "there
@@ -1042,11 +1079,6 @@ fn parses_as_a_position_that_declares_nothing(tokens: &TokenStream) -> bool {
         .is_ok()
         || syn::parse::Parser::parse2(
             Punctuated::<syn::Variant, syn::Token![,]>::parse_terminated,
-            tokens.clone(),
-        )
-        .is_ok()
-        || syn::parse::Parser::parse2(
-            Punctuated::<syn::Arm, syn::Token![,]>::parse_terminated,
             tokens.clone(),
         )
         .is_ok()
@@ -1154,7 +1186,23 @@ fn base_idents(ty: &syn::Type, out: &mut Vec<String>) {
                 base_idents(element, out);
             }
         }
-        syn::Type::Path(_) => out.extend(base_ident(ty)),
+        syn::Type::Path(path) => {
+            let Some(segment) = path.path.segments.last() else {
+                return;
+            };
+            let name = segment.ident.to_string();
+            // The transparent wrappers are unwrapped here too rather than being
+            // left to `base_ident`, so that a tuple *inside* one is reached:
+            // `Option<(u8, Artifact)>` hands back an `Artifact` and
+            // `base_ident` alone stops at the tuple it cannot name.
+            if TRANSPARENT.contains(&name.as_str())
+                && let Some(inner) = first_type_argument(&segment.arguments)
+            {
+                base_idents(inner, out);
+                return;
+            }
+            out.push(name);
+        }
         _ => {}
     }
 }

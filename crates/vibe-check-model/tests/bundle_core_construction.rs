@@ -377,3 +377,76 @@ fn fixture() -> BundleCore {
         "`not(test)` is in the artifact people link against; `test` is not"
     );
 }
+
+#[test]
+fn a_macro_used_in_type_position_does_not_stop_this_guard() {
+    // A macro may legally expand into far more than an item list, an expression
+    // or a block, and the reader used to try only those three. This is ordinary
+    // stable Rust:
+    //
+    //     macro_rules! list { ($item:ty) => { ::std::vec::Vec<$item> }; }
+    //     pub type Facts = list!(EvidenceFacts);
+    //
+    // and it made the reader panic with a message about an `impl` hiding inside
+    // a macro body — on *this* guard, which has nothing to do with the change,
+    // because this guard reads every source file in the workspace. Someone
+    // adding a type alias would see two frozen-model tests explode for reasons
+    // they cannot act on, and that is the shape of failure that gets a guard
+    // deleted rather than fixed.
+    //
+    // The expansion is still visited, and there is still nothing in it: a type
+    // cannot carry a construction site.
+    let sample = common::read(
+        "sample",
+        r"
+macro_rules! list {
+    ($item:ty) => { ::std::vec::Vec<$item> };
+}
+pub type Facts = list!(BundleCore);
+
+macro_rules! fields {
+    ($name:ident) => { $name: Tier, digest: Digest };
+}
+
+macro_rules! guard {
+    ($t:ty) => { $t: Clone + Send };
+}
+
+macro_rules! branch {
+    ($pattern:pat) => { $pattern => BundleCore { tier } };
+}
+
+pub fn real() -> BundleCore {
+    BundleCore { tier }
+}
+",
+    );
+    let found: Vec<String> = common::struct_literals(&sample)
+        .into_iter()
+        .filter(|literal| literal.type_name == "BundleCore")
+        .map(|literal| literal.function)
+        .collect();
+
+    assert_eq!(
+        found,
+        ["real", "<none>"],
+        "the one in the function and the one in the match-arm macro body — a \
+         type, a field list and a where-clause predicate carry none, and the \
+         arm is still read rather than merely recognised and dropped"
+    );
+}
+
+#[test]
+#[should_panic(expected = "could not be re-parsed")]
+fn an_unreadable_expansion_that_could_hold_an_item_is_still_a_loud_failure() {
+    // The half of the previous test that must not be lost. Widening the reader
+    // to accept the positions that declare nothing is only safe while an
+    // expansion it can place *nowhere* still stops the guard — otherwise the
+    // fix for a spurious panic becomes a silent skip, which is the regression
+    // the macro reader exists to undo, reintroduced through its own escape
+    // hatch.
+    let _ = common::read(
+        "sample",
+        "macro_rules! partial { ($t:ty) => { impl $t for }; }\n",
+    );
+}
