@@ -170,7 +170,10 @@ mod tests {
     fn leaf(id: &str, program: &str) -> Leaf {
         Leaf {
             id: LeafId::new_checked(id).expect("a well-formed fixture leaf id"),
-            requirement: RequirementId::new(format!("req_{id}")),
+            requirement: RequirementId::from_wire(format!(
+                "req_{id}_00000000000000000000000000000000"
+            ))
+            .expect("a well-formed fixture identifier"),
             plan: ProcessPlan::new(program, []),
             lane: LaneId::new("cheap"),
         }

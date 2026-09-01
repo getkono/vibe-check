@@ -41,6 +41,7 @@ pub mod location;
 pub mod reason;
 pub mod resolution;
 pub mod schema;
+pub mod scope;
 pub mod tier;
 pub mod time;
 
@@ -55,7 +56,7 @@ pub use evidence::{
 };
 pub use ids::{
     AdoptionSourceId, AnalyzerId, CapabilityId, CrateId, FactKey, LaneId, LeafId, LeafIdError,
-    MetricKey, ParserId, RequirementId, RiskFlagId, RuleId,
+    MetricKey, ParserId, RequirementId, RequirementIdError, RiskFlagId, RuleId,
 };
 pub use known::{Known, UnknownKind};
 pub use location::{LineRange, Location};
@@ -64,5 +65,6 @@ pub use resolution::{
     CapabilityResolution, Judgement, ResolutionState, Resolutions, SkipReason, UnverifiedReason,
 };
 pub use schema::SchemaVersion;
+pub use scope::{RequirementScope, ScopeError};
 pub use tier::{Tier, Verdict};
 pub use time::DecisionTime;
