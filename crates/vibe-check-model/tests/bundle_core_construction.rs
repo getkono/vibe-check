@@ -450,3 +450,52 @@ fn an_unreadable_expansion_that_could_hold_an_item_is_still_a_loud_failure() {
         "macro_rules! partial { ($t:ty) => { impl $t for }; }\n",
     );
 }
+
+#[test]
+fn a_type_position_macro_whose_expansion_says_impl_is_not_a_hidden_item() {
+    // The falsifier the previous round was missing. Recognising the
+    // declaration-free expansion positions and the keyword backstop are two
+    // separate layers, and the keyword backstop alone covers almost
+    // everything — `::std::vec::Vec<$item>` contains no `impl`, no `fn` and no
+    // `struct`, so it is passed over whether or not anything parsed it.
+    //
+    // This is the shape where they come apart:
+    //
+    //     macro_rules! iter { ($t:ty) => { impl Iterator<Item = $t> }; }
+    //
+    // `impl Trait` is a *type*, and it is the one type whose spelling starts
+    // with the keyword that means "an item is hiding here". Without the
+    // position parse, the backstop reads the `impl` and the reader panics —
+    // five tests across two guard binaries, on a return type that declares
+    // nothing at all.
+    let sample = common::read(
+        "sample",
+        r"
+macro_rules! iter {
+    ($t:ty) => { impl Iterator<Item = $t> };
+}
+macro_rules! boxed {
+    ($t:ty) => { Box<dyn Fn() -> $t + Send> };
+}
+pub fn stream() -> iter!(u8) {
+    ::core::iter::empty()
+}
+pub fn real() -> BundleCore {
+    BundleCore { tier }
+}
+",
+    );
+    let found: Vec<String> = common::struct_literals(&sample)
+        .into_iter()
+        .filter(|literal| literal.type_name == "BundleCore")
+        .map(|literal| literal.function)
+        .collect();
+
+    assert_eq!(
+        found,
+        ["real"],
+        "an `impl Trait` expansion is a type, and a type holds no construction \
+         site — but the reader has to be able to *say* it is a type, because \
+         the word `impl` is otherwise the signal that it cannot"
+    );
+}

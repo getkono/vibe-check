@@ -151,7 +151,13 @@ fn nothing_converts_into_evidence_or_an_artifact() {
          \n\
          If you need to record that a capability could not be answered, that is \
          what `UnverifiedReason` is for — and it is the only thing a failure is \
-         allowed to become.",
+         allowed to become.\n\
+         \n\
+         If a line above is spelled nowhere in that file, it came out of a \
+         `macro_rules!` body: the reader binds every metavariable in a rule to \
+         the same identifier, so `impl From<$src> for $dst` is reported as \
+         `impl From<Evidence> for Evidence`. Open the macro, not the rendered \
+         line.",
         offenders.join("\n")
     );
 }
@@ -802,5 +808,137 @@ fn a_conversion_into_an_alias_is_a_conversion_into_the_type() {
             .iter()
             .all(|conversion| conversion.target == "Evidence"),
         "both spellings, through the alias, land on `Evidence`"
+    );
+}
+
+#[test]
+fn a_macro_standing_where_a_type_goes_is_expanded_not_ignored() {
+    // The shortest bypass of this file's prohibition that exists. `syn` parses
+    // `ev!()` as `Type::Macro`, the type reader dropped it on its catch-all
+    // arm, and the conversion came back with no target at all — so three lines
+    // put `impl From<String> for Evidence` in the shipped crate with every
+    // guard in this directory green.
+    //
+    // It is the other half of the mechanism this file already handles at the
+    // macro *definition*: a type-position expansion declares nothing, which is
+    // why the reader passes over it, and passing over it is exactly what made
+    // the invocation invisible. Closing one without the other closes nothing.
+    let sample = common::read(
+        "sample",
+        r"
+        macro_rules! ev { () => { Evidence }; }
+        macro_rules! art { () => { Artifact }; }
+        impl From<String> for ev!() {
+            fn from(_value: String) -> Self { unimplemented!() }
+        }
+        pub fn launder(_conclusion: &str) -> art!() { unimplemented!() }
+        ",
+    );
+    let items = sample.items();
+
+    assert_eq!(
+        common::conversions(items)
+            .into_iter()
+            .map(|conversion| conversion.target)
+            .collect::<Vec<_>>(),
+        ["Evidence"],
+        "the macro in the `for` position names the type it expands to"
+    );
+
+    let producers: Vec<String> = common::functions(items)
+        .into_iter()
+        .filter(|function| {
+            function
+                .produces
+                .iter()
+                .any(|name| FORBIDDEN_TARGETS.contains(&name.as_str()))
+        })
+        .map(|function| function.path())
+        .collect();
+    assert_eq!(
+        producers,
+        ["ev!::from", "launder"],
+        "and so does one in the return position — including the `from` the \
+         conversion itself declares, whose `-> Self` is the macro's type. The \
+         owner is reported as written rather than as what it expands to, \
+         because `ev!::from` sends a reader to the line that is actually there \
+         while `Evidence::from` sends them looking for one that is not"
+    );
+}
+
+#[test]
+#[should_panic(expected = "macro invocation standing where a type goes")]
+fn a_type_position_macro_this_reader_cannot_expand_is_a_loud_failure() {
+    // The half that makes the fix above worth anything. A macro defined in
+    // another file or another crate cannot be expanded here, and the two
+    // guesses available are both wrong: calling it forbidden fails on legal
+    // code, calling it harmless is the bypass. So the reader stops, and this is
+    // what proves it actually does rather than falling back to a silent miss.
+    let _ = common::conversions(
+        common::read("sample", "impl From<String> for elsewhere!() {}\n").items(),
+    );
+}
+
+#[test]
+fn an_invocation_inside_a_macro_body_still_binds_the_inner_macro() {
+    // Critical 2 reopened one layer down. The invocation pool was collected
+    // from the file and never from the expansions, so a macro whose body
+    // invokes another macro left the inner one's metavariables unbound — and
+    // `impl From<$src> for $dst` went back to reading as a conversion into
+    // `metavar_dst`, which nothing forbids.
+    //
+    // The shape is what someone writes to tidy a file, not to hide anything:
+    // collapsing eleven `id_newtype!` calls into one `ids! { A, B, C }` is
+    // exactly this, and it would unbind `$name` for a whole crate.
+    let sample = common::read(
+        "sample",
+        r"
+        macro_rules! conv {
+            ($src:ty => $dst:ty) => {
+                impl From<$src> for $dst {
+                    fn from(_value: $src) -> Self { unimplemented!() }
+                }
+            };
+        }
+        macro_rules! outer { () => { conv!(String => Evidence); }; }
+        outer!();
+        ",
+    );
+
+    assert!(
+        common::conversions(sample.items())
+            .iter()
+            .any(|conversion| conversion.target == "Evidence"),
+        "the pool is iterated until no expansion turns up an invocation nobody \
+         had counted, so one layer of indirection is not a hiding place"
+    );
+}
+
+#[test]
+fn an_alias_chain_longer_than_any_step_limit_is_still_followed() {
+    // The reader used to give up after sixteen links and return the unresolved
+    // name, which is a producer read as harmless — the one direction this
+    // module says it never goes. A step limit is a cliff; the fix is to
+    // remember where it has been instead of counting.
+    let depth = 40;
+    let mut source = String::from("type Link0 = Evidence;\n");
+    for step in 1..=depth {
+        source.push_str(&format!("type Link{step} = Link{};\n", step - 1));
+    }
+    source.push_str(&format!(
+        "pub fn launder(_conclusion: &str) -> Link{depth} {{ unimplemented!() }}\n"
+    ));
+    let sample = common::read("sample", &source);
+
+    let producers: Vec<String> = common::functions(sample.items())
+        .into_iter()
+        .filter(|function| function.produces.iter().any(|name| name == "Evidence"))
+        .map(|function| function.path())
+        .collect();
+
+    assert_eq!(
+        producers,
+        ["launder"],
+        "forty links is still `Evidence`, and so is four hundred"
     );
 }

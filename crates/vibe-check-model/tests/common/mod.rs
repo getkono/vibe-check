@@ -56,11 +56,21 @@
 //!    real name is written only at the invocation — which `syn` also hands
 //!    back as opaque tokens. So the invocations' arguments are collected,
 //!    pooled across the workspace, and substituted in as well. See
-//!    [`substitute`].
-//! 6. **A written name is not a type.** Every rule here keys on an identifier,
+//!    [`substitute`]. An expansion is itself source that can invoke a macro, so
+//!    the collecting runs to a fixpoint rather than one layer deep — see
+//!    [`build`].
+//! 6. **A macro standing where a type goes.** The mirror of 4, and the sharper
+//!    half. `impl From<String> for ev!()` is `impl From<String> for Evidence`
+//!    once the compiler is done, and `syn` parses `ev!()` as a `Type::Macro`
+//!    the type reader used to drop on its catch-all arm — three lines, and the
+//!    whole directory green. Recognising a type-position expansion at the
+//!    *definition* (so it stops panicking) and reading it at the *invocation*
+//!    are two halves of one mechanism; closing one alone closes nothing. See
+//!    [`Names`].
+//! 7. **A written name is not a type.** Every rule here keys on an identifier,
 //!    and a type alias, a tuple and an associated type are three ways to hand
 //!    back the forbidden value while writing a different one. The first two are
-//!    resolved — see [`resolve_alias`] for exactly how far, and for what is
+//!    resolved — see [`Names`] for exactly how far, and for what is
 //!    deliberately left alone.
 //!
 //! A guard that stops catching something silently is worse than no guard: the
@@ -493,8 +503,63 @@ pub fn read(label: &str, source: &str) -> Source {
     build(label.to_owned(), file, arguments)
 }
 
-/// Walk `file`, expanding each `macro_rules!` body against `arguments`.
+/// Walk `file`, expanding each `macro_rules!` body against `arguments`, and
+/// keep doing it until no expansion turns up an invocation nobody had counted.
+///
+/// One pass is not enough, because an expansion is source: a macro whose body
+/// invokes another macro binds that one's metavariables, and the binding is
+/// only visible once the outer body has been re-parsed.
+///
+/// ```ignore
+/// macro_rules! conv  { ($src:ty => $dst:ty) => { impl From<$src> for $dst {…} }; }
+/// macro_rules! outer { () => { conv!(String => Evidence); }; }
+/// outer!();
+/// ```
+///
+/// Nothing in the *file* invokes `conv!`, so a single pass leaves its target as
+/// `metavar_dst` and the forbidden impl is invisible again — the same hole the
+/// invocation pool exists to close, one layer down. This is not a contrived
+/// shape: collapsing the eleven `id_newtype!` calls in `ids.rs` into one
+/// `ids! { A, B, C }` wrapper is the ordinary way someone eventually tidies
+/// that file, and it would unbind `$name` for every identifier in the crate.
+///
+/// The pool only ever grows and the identifiers it can hold are finite, so the
+/// loop terminates. The bound is a backstop against a reader bug, and hitting
+/// it is a loud failure rather than a silent truncation, for the same reason
+/// everything else here is.
 fn build(label: String, file: syn::File, arguments: Arguments) -> Source {
+    let mut arguments = arguments;
+
+    for _ in 0..32 {
+        let source = build_once(label.clone(), file.clone(), arguments.clone());
+        let mut grown = arguments.clone();
+        merge_arguments(&mut grown, &source.arguments);
+        if grown == arguments {
+            return source;
+        }
+        arguments = grown;
+    }
+
+    panic!(
+        "`{label}`: the macro invocations in this file kept turning up new ones \
+         after 32 rounds of expansion. A reader that stopped here would be \
+         expanding some macros against a pool it had already decided was \
+         complete, which is the silent-skip failure this whole module is built \
+         to avoid."
+    );
+}
+
+/// Merge one argument pool into another.
+fn merge_arguments(into: &mut Arguments, from: &Arguments) {
+    for (macro_name, idents) in from {
+        into.entry(macro_name.clone())
+            .or_default()
+            .extend(idents.iter().cloned());
+    }
+}
+
+/// One pass of [`build`].
+fn build_once(label: String, file: syn::File, arguments: Arguments) -> Source {
     let mut walk = ItemWalk {
         label: label.clone(),
         arguments,
@@ -504,10 +569,14 @@ fn build(label: String, file: syn::File, arguments: Arguments) -> Source {
     };
     syn::visit::Visit::visit_file(&mut walk, &file);
 
-    // A macro expansion is source too, and it can define macros of its own.
+    // A macro expansion is source too: it can define macros of its own, and it
+    // can *invoke* them. Both matter, and only the first used to be collected —
+    // which left `outer!() -> conv!(String => Evidence)` with nothing bound.
     let mut index = 0usize;
     while index < walk.macro_files.len() {
         let expansion = walk.macro_files[index].clone();
+        let invoked = invocation_arguments(&expansion);
+        merge_arguments(&mut walk.arguments, &invoked);
         syn::visit::Visit::visit_file(&mut walk, &expansion);
         index += 1;
     }
@@ -582,20 +651,33 @@ pub fn workspace_sources() -> Vec<(Utf8PathBuf, Source)> {
     // like a conversion into `metavar_dst`, which nothing forbids, so the
     // arguments are pooled across the workspace and every definition is
     // expanded again against all of them.
+    //
+    // Iterated to a fixpoint, because expanding one file against the pool can
+    // reveal invocations that were themselves inside a macro body, and those
+    // bind metavariables in some *other* file's macros. One round would stop
+    // exactly one layer short, which is the same failure as expanding a file
+    // only once.
     let mut pooled = Arguments::new();
-    for (_, source) in &sources {
-        for (macro_name, idents) in source.arguments() {
-            pooled
-                .entry(macro_name.clone())
-                .or_default()
-                .extend(idents.iter().cloned());
+    for _ in 0..32 {
+        let mut grown = pooled.clone();
+        for (_, source) in &sources {
+            merge_arguments(&mut grown, source.arguments());
+        }
+        if grown == pooled {
+            return sources;
+        }
+        pooled = grown;
+        for (_, source) in &mut sources {
+            source.expand_against(&pooled);
         }
     }
-    for (_, source) in &mut sources {
-        source.expand_against(&pooled);
-    }
 
-    sources
+    panic!(
+        "the workspace's macro invocations kept turning up new ones after 32 \
+         rounds of pooling. Stopping here would expand some macro against a \
+         pool already assumed complete, which is the silent skip this module \
+         exists to prevent."
+    );
 }
 
 /// The immediate subdirectories of `dir`, i.e. the workspace's crates.
@@ -776,6 +858,24 @@ fn mentions_any(stream: &TokenStream, names: &std::collections::BTreeSet<String>
 /// direction to be wrong in: the cost is a spurious `impl From<CapabilityId>
 /// for CapabilityId` that no rule mentions, and the alternative is a real
 /// `impl From<String> for Evidence` that no rule sees.
+///
+/// # Two consequences worth knowing before reading a failure
+///
+/// A reported impl may be **spelled nowhere in the source**. Because every
+/// metavariable in a rule takes the same identifier on a given pass,
+/// `impl From<$src> for $dst` bound to `Evidence` renders as
+/// `impl From<Evidence> for Evidence`, and grepping for that string finds
+/// nothing. The macro named in the failure is what to open, not the rendered
+/// line; the guards say so where they report one.
+///
+/// The pool is keyed by macro *name* and collects identifiers at any depth of
+/// the invocation, so it picks up more than the arguments proper. A `///` doc
+/// comment lowers to `#[doc = "…"]`, whose `doc` is an identifier, so
+/// `id_newtype!`'s pool contains `doc` and one expansion of it declares a
+/// phantom `pub struct doc(SmolStr)`. Harmless for every rule here — none of
+/// them enumerates declarations — but a rule that counted types, or asserted
+/// that a module declares exactly what it should, would see it and should
+/// filter the pool rather than trust it.
 ///
 /// Only the metavariables named in [`Binding::names`] take the identifier;
 /// everything else still becomes a placeholder, so an `$expr` keeps standing
@@ -1164,6 +1264,13 @@ pub fn base_ident(ty: &syn::Type) -> Option<String> {
             }
             Some(name)
         }
+        // Not a name yet — a macro invocation standing where a type goes. It
+        // is handed back with the `!` still on it so that it cannot be
+        // mistaken for an ordinary identifier, and [`Names::of`] either
+        // resolves it or refuses to continue. Returning `None` here, which is
+        // what the catch-all used to do, made `impl From<String> for ev!()`
+        // a conversion with no target at all.
+        syn::Type::Macro(invocation) => Some(format!("{}!", last_ident(&invocation.mac.path)?)),
         _ => None,
     }
 }
@@ -1203,57 +1310,159 @@ fn base_idents(ty: &syn::Type, out: &mut Vec<String>) {
             }
             out.push(name);
         }
+        syn::Type::Macro(invocation) => {
+            out.extend(last_ident(&invocation.mac.path).map(|name| format!("{name}!")));
+        }
         _ => {}
     }
 }
 
-/// The type aliases declared by `items`, `type Ev = Evidence;` by name.
+/// What every written name in a set of items finally stands for.
 ///
-/// Every rule in this directory keys on a *written* name, and an alias is a
-/// second written name for the same type: `type Ev = Evidence;` turns
-/// `fn launder(run: &CheckRun) -> Ev` into a producer of `Evidence` that no
-/// rule about `Evidence` can see. Rust resolves the alias and the guard did
-/// not, which is the whole gap.
+/// Two things stand between the identifier someone wrote and the type it names,
+/// and every rule in this directory keys on the identifier:
 ///
-/// Same-file only, and that is a deliberate stopping point rather than an
-/// oversight — see [`resolve_alias`].
-fn type_aliases(items: &[syn::Item]) -> std::collections::BTreeMap<String, String> {
-    let mut out = std::collections::BTreeMap::new();
-    for item in items {
-        let syn::Item::Type(alias) = item else {
-            continue;
-        };
-        if let Some(target) = base_ident(&alias.ty) {
-            out.insert(alias.ident.to_string(), target);
-        }
-    }
-    out
+/// - a **type alias**, `type Ev = Evidence;`, which is a second name for the
+///   same type — and the compiler resolves it while a rule matching the word
+///   `Evidence` does not;
+/// - a **macro invocation in type position**, `impl From<String> for ev!()`,
+///   which is not an identifier at all until the macro is expanded.
+///
+/// The second is the sharper of the two. `syn` parses `ev!()` as
+/// `Type::Macro`, [`base_ident`] used to drop it on the catch-all arm, and the
+/// conversion came back with no target — so three lines defined
+/// `impl From<String> for Evidence` in the shipped crate with every guard in
+/// this directory green. It is the more dangerous half of the same mechanism
+/// this module already handles at the macro *definition*: a type-position
+/// expansion declares nothing, which is why the reader passes over it, and
+/// passing over it is exactly what made the invocation invisible.
+pub struct Names {
+    aliases: std::collections::BTreeMap<String, String>,
+    macros: std::collections::BTreeMap<String, Vec<String>>,
 }
 
-/// Follow an alias chain to the name it finally stands for.
-///
-/// `type A = B; type B = Evidence;` resolves `A` to `Evidence`. The step limit
-/// is there because `type A = B; type B = A;` does not compile but this reader
-/// is not a compiler, and a guard that hangs is a guard that gets killed.
-///
-/// # What this deliberately does not resolve
-///
-/// An alias visible only through a `use` from another file, an associated type
-/// (`Self::Output`), and a generic parameter bound to the forbidden type
-/// elsewhere. Each needs name resolution across crates or trait resolution —
-/// which is to say, a type checker — and half a type checker inside a guard is
-/// a thing that is wrong in ways nobody can predict. The same-file case is the
-/// one a person actually reaches for, because an alias is written where it is
-/// used; the rest is recorded here as known, not as handled.
-fn resolve_alias(name: &str, aliases: &std::collections::BTreeMap<String, String>) -> String {
-    let mut current = name.to_owned();
-    for _ in 0..16 {
-        match aliases.get(&current) {
-            Some(next) if *next != current => current = next.clone(),
-            _ => break,
+impl Names {
+    /// Build the table from the items of one source.
+    ///
+    /// Same-file only, and that is a deliberate stopping point rather than an
+    /// oversight — see [`Names::of`].
+    #[must_use]
+    pub fn in_scope(items: &[syn::Item]) -> Self {
+        let mut aliases = std::collections::BTreeMap::new();
+        let mut macros: std::collections::BTreeMap<String, Vec<String>> =
+            std::collections::BTreeMap::new();
+
+        for item in items {
+            match item {
+                syn::Item::Type(alias) => {
+                    if let Some(target) = base_ident(&alias.ty) {
+                        aliases.insert(alias.ident.to_string(), target);
+                    }
+                }
+                syn::Item::Macro(definition) => {
+                    let (Some(name), true) = (
+                        definition.ident.as_ref(),
+                        definition.mac.path.is_ident("macro_rules"),
+                    ) else {
+                        continue;
+                    };
+                    // Every rule contributes, because an invocation may match
+                    // any of them and this reader does not know which. The
+                    // union is the fail-closed answer: a macro with one rule
+                    // yielding `Evidence` is read as yielding `Evidence`
+                    // however many other rules it has.
+                    let mut yielded = Vec::new();
+                    for rule in rules(&definition.mac.tokens) {
+                        let tokens = substitute(rule.expansion.clone(), None);
+                        if let Ok(ty) = syn::parse2::<syn::Type>(tokens) {
+                            base_idents(&ty, &mut yielded);
+                        }
+                    }
+                    yielded.dedup();
+                    macros.insert(format!("{name}!"), yielded);
+                }
+                _ => {}
+            }
         }
+
+        Self { aliases, macros }
     }
-    current
+
+    /// Every type one written name could stand for.
+    ///
+    /// # Panics
+    ///
+    /// If the name is a macro invocation this table has never seen defined. A
+    /// guard that cannot read a type sitting where its rule keys must not
+    /// guess, and the two guesses available are both wrong: calling it
+    /// forbidden fails on legal code, and calling it harmless is a three-line
+    /// bypass of the strongest prohibition in this workspace.
+    ///
+    /// If an alias chain loops. `type A = B; type B = A;` does not compile, so
+    /// reaching one means this reader has misread something.
+    ///
+    /// # What this deliberately does not resolve
+    ///
+    /// An alias or a macro visible only through a `use` or a `#[macro_export]`
+    /// from another file, an associated type (`Self::Output`), and a generic
+    /// parameter bound to the forbidden type elsewhere. Each needs name
+    /// resolution across crates or trait resolution — which is to say, a type
+    /// checker — and half a type checker inside a guard is a thing that is
+    /// wrong in ways nobody can predict. The same-file case is the one a person
+    /// actually reaches for, because an alias is written where it is used.
+    ///
+    /// A macro whose expansion is a type with no nameable base — `impl Trait`,
+    /// a function pointer, a slice — resolves to nothing rather than failing.
+    /// That is the same answer the reader gives for those types written out in
+    /// full, and a limit shared with a written `-> impl Iterator<Item = …>` is
+    /// a limit, not a hole opened here.
+    #[must_use]
+    pub fn of(&self, name: &str) -> Vec<String> {
+        if let Some(yielded) = self.macros.get(name) {
+            return yielded
+                .iter()
+                .map(|inner| self.through_aliases(inner))
+                .collect();
+        }
+        assert!(
+            !name.ends_with('!'),
+            "`{name}` is a macro invocation standing where a type goes, and no \
+             `macro_rules! {}` is defined in this file for the reader to expand \
+             it with. A macro in type position is the shortest bypass there is \
+             of the rules in this directory — `impl From<String> for ev!()` is \
+             `impl From<String> for Evidence` once the compiler is done — so it \
+             cannot be passed over. If the macro is defined in another file or \
+             another crate, write the type out here instead; if it is new, this \
+             reader needs teaching before the type it names can be trusted.",
+            name.trim_end_matches('!')
+        );
+        vec![self.through_aliases(name)]
+    }
+
+    /// Follow an alias chain to the name it finally stands for.
+    ///
+    /// `type A = B; type B = Evidence;` resolves `A` to `Evidence`. Visited
+    /// names are remembered rather than steps being counted: a step limit is a
+    /// cliff, and past it the answer silently becomes the un-resolved name —
+    /// which in this module means an unsanctioned producer read as harmless,
+    /// the one direction it says it never goes.
+    fn through_aliases(&self, name: &str) -> String {
+        let mut seen = std::collections::BTreeSet::new();
+        let mut current = name.to_owned();
+        while let Some(next) = self.aliases.get(&current) {
+            assert!(
+                seen.insert(current.clone()),
+                "the type alias chain from `{name}` loops back on itself at \
+                 `{current}`. That does not compile, so this reader has misread \
+                 the file rather than found a real cycle."
+            );
+            if *next == current {
+                break;
+            }
+            current = next.clone();
+        }
+        current
+    }
 }
 
 /// The first type among a path segment's angle-bracketed arguments.
@@ -1342,7 +1551,7 @@ fn visibility_of(vis: &syn::Visibility) -> Vis {
 /// producer of an `Evidence` that it is.
 #[must_use]
 pub fn functions(items: &[syn::Item]) -> Vec<Function> {
-    let aliases = type_aliases(items);
+    let names = Names::in_scope(items);
     let mut out = Vec::new();
 
     for item in items {
@@ -1353,7 +1562,7 @@ pub fn functions(items: &[syn::Item]) -> Vec<Function> {
                     visibility_of(&function.vis),
                     None,
                     None,
-                    &aliases,
+                    &names,
                 ));
             }
             syn::Item::Impl(block) => {
@@ -1371,7 +1580,7 @@ pub fn functions(items: &[syn::Item]) -> Vec<Function> {
                         visibility_of(&function.vis),
                         owner.clone(),
                         owner_trait.clone(),
-                        &aliases,
+                        &names,
                     ));
                 }
             }
@@ -1389,7 +1598,7 @@ pub fn functions(items: &[syn::Item]) -> Vec<Function> {
                         Vis::Inherited,
                         None,
                         Some(name.clone()),
-                        &aliases,
+                        &names,
                     ));
                 }
             }
@@ -1406,7 +1615,7 @@ fn described(
     visibility: Vis,
     owner: Option<String>,
     owner_trait: Option<String>,
-    aliases: &std::collections::BTreeMap<String, String>,
+    names: &Names,
 ) -> Function {
     let receiver = match sig.inputs.first() {
         Some(syn::FnArg::Receiver(receiver)) => {
@@ -1444,13 +1653,13 @@ fn described(
     }
     let produces: Vec<String> = produced
         .into_iter()
-        .map(|name| {
+        .flat_map(|name| {
             let resolved = if name == "Self" {
                 owner.clone().unwrap_or(name)
             } else {
                 name
             };
-            resolve_alias(&resolved, aliases)
+            names.of(&resolved)
         })
         .collect();
 
@@ -1479,13 +1688,22 @@ fn implemented_trait(block: &syn::ItemImpl) -> Option<String> {
 /// Every `impl` block whose self type has the base identifier `name`.
 #[must_use]
 pub fn impls_for<'a>(items: &'a [syn::Item], name: &str) -> Vec<&'a syn::ItemImpl> {
+    let names = Names::in_scope(items);
     items
         .iter()
-        .filter_map(|item| match item {
-            syn::Item::Impl(block) if base_ident(&block.self_ty).as_deref() == Some(name) => {
-                Some(block)
-            }
-            _ => None,
+        .filter_map(|item| {
+            let syn::Item::Impl(block) = item else {
+                return None;
+            };
+            // Resolved, so that `impl bc!() { … }` counts against `BundleCore`
+            // rather than against nothing. A macro standing where the self type
+            // goes is the same bypass as one standing in a conversion target.
+            let written = base_ident(&block.self_ty)?;
+            names
+                .of(&written)
+                .iter()
+                .any(|it| it == name)
+                .then_some(block)
         })
         .collect()
 }
@@ -1554,7 +1772,7 @@ pub fn struct_fields(items: &[syn::Item], name: &str) -> Vec<(String, Vis)> {
 /// matching the written word `Evidence` does not.
 #[must_use]
 pub fn conversions(items: &[syn::Item]) -> Vec<Conversion> {
-    let aliases = type_aliases(items);
+    let names = Names::in_scope(items);
     let mut out = Vec::new();
 
     for item in items {
@@ -1594,11 +1812,20 @@ pub fn conversions(items: &[syn::Item]) -> Vec<Conversion> {
         } else {
             (named, own)
         };
-        out.push(Conversion {
-            via,
-            source: resolve_alias(&source, &aliases),
-            target: resolve_alias(&target, &aliases),
-        });
+        // One `impl` can yield several conversions once both ends are
+        // resolved, because a macro in type position may expand to more than
+        // one type across its rules. Every combination is reported: the rule
+        // is that *nothing* converts into an `Evidence`, so one reachable
+        // spelling is enough.
+        for source in names.of(&source) {
+            for target in names.of(&target) {
+                out.push(Conversion {
+                    via: via.clone(),
+                    source: source.clone(),
+                    target,
+                });
+            }
+        }
     }
 
     out
@@ -1614,6 +1841,7 @@ pub fn conversions(items: &[syn::Item]) -> Vec<Conversion> {
 #[must_use]
 pub fn struct_literals(source: &Source) -> Vec<Literal> {
     let mut walk = LiteralWalk {
+        names: Names::in_scope(source.items()),
         found: Vec::new(),
         enclosing_impl: Vec::new(),
         enclosing_fn: Vec::new(),
@@ -1632,6 +1860,7 @@ pub fn struct_literals(source: &Source) -> Vec<Literal> {
 
 /// Tracks the `impl` and function a struct literal was written inside.
 struct LiteralWalk {
+    names: Names,
     found: Vec<Literal>,
     enclosing_impl: Vec<Option<String>>,
     enclosing_fn: Vec<String>,
@@ -1646,7 +1875,12 @@ impl<'ast> syn::visit::Visit<'ast> for LiteralWalk {
     }
 
     fn visit_item_impl(&mut self, block: &'ast syn::ItemImpl) {
-        self.enclosing_impl.push(base_ident(&block.self_ty));
+        // `Self { … }` inside `impl bc!() { … }` is a construction site of
+        // whatever `bc!` names, and reading the self type without resolving it
+        // left the literal attributed to `Self`.
+        let owner = base_ident(&block.self_ty)
+            .and_then(|written| self.names.of(&written).into_iter().next());
+        self.enclosing_impl.push(owner);
         syn::visit::visit_item_impl(self, block);
         self.enclosing_impl.pop();
     }
