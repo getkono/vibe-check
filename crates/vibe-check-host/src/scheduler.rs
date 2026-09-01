@@ -223,14 +223,23 @@ mod tests {
     /// Poll a dispatch future exactly once, without a runtime and without a
     /// waker that can ever wake it.
     ///
-    /// The point is that it *cannot* drive a future to completion. Anything
-    /// that comes back `Ready` here was already finished when it was handed
-    /// over, which is the property [`Dispatch::Deferred`] is documented to
-    /// have and the reason the engine may not block on one. The floor
-    /// assertion for this helper is
-    /// `the_poll_helper_can_observe_a_future_that_is_not_ready`, below: without
-    /// it, a helper that returned `Ready` unconditionally would pass every
-    /// other test in this module.
+    /// What this distinguishes is *yielding from not yielding*, and nothing
+    /// else. `#[async_trait]` desugars `dispatch` into `Box::pin(async move
+    /// { .. })`, and an async block does no work until it is first polled — so
+    /// the body runs *during* this call, not before it. A `Ready` here
+    /// therefore does not mean the future arrived finished; it means the body
+    /// ran to completion without ever awaiting something that was not already
+    /// ready, because a waker that cannot wake is the only one it was given.
+    ///
+    /// The residual, stated so a later reader does not have to rediscover it:
+    /// a future that does arbitrary blocking-CPU work and then returns also
+    /// comes back `Ready`. This helper says a dispatch did not suspend. It
+    /// does not say the dispatch was cheap.
+    ///
+    /// The floor assertion is
+    /// `the_poll_helper_can_observe_a_future_that_is_not_ready`, below:
+    /// without it, a helper that returned `Ready` unconditionally would pass
+    /// every other test in this module.
     fn poll_once(scheduler: &dyn Scheduler, leaves: Leaves) -> Poll<Dispatch> {
         let mut future = scheduler.dispatch(leaves);
         let mut context = Context::from_waker(Waker::noop());
@@ -239,9 +248,19 @@ mod tests {
 
     /// Hands the batch to an external scheduler and returns immediately.
     ///
-    /// What `ActionsScheduler` will be in M4: it emits a job matrix and does
-    /// not await anything, because in CI the work has not started and the job
+    /// The shape `ActionsScheduler` is meant to have in M4: emit a job matrix
+    /// and await nothing, because in CI the work has not started and the job
     /// that collects the evidence does not exist yet.
+    ///
+    /// **Nothing enforces that shape.** `Dispatch::Deferred` is a data
+    /// variant; it carries no polling behaviour, and the trait bound permits
+    /// an implementation that awaits a forge round trip and *then* returns
+    /// `Deferred`. Such an implementation would block the engine exactly as
+    /// the variant's own documentation says it must not, and would leave this
+    /// suite green. So the tests below constrain this fixture, and the
+    /// structural half of the contract on the variant — not every future
+    /// `Scheduler`. Closing that gap needs something the type system can hold,
+    /// which this issue does not carry.
     struct DeferringScheduler;
 
     #[async_trait]
@@ -406,10 +425,10 @@ mod tests {
 
     #[test]
     fn the_poll_helper_can_observe_a_future_that_is_not_ready() {
-        // The floor for `a_deferred_dispatch_is_ready_without_being_driven`.
-        // A `poll_once` that answered `Ready` unconditionally would make that
+        // The floor for `the_deferring_fixture_completes_without_yielding`. A
+        // `poll_once` that answered `Ready` unconditionally would make that
         // test assert nothing at all, so the helper is shown here failing to
-        // resolve a future that genuinely blocks.
+        // resolve a future that genuinely suspends.
         assert!(
             poll_once(&BlockingScheduler, batch(&["a"])).is_pending(),
             "a dispatch that awaits cannot be resolved by one poll"
@@ -417,14 +436,19 @@ mod tests {
     }
 
     #[test]
-    fn a_deferred_dispatch_is_ready_without_being_driven() {
-        // The documented rule on `Dispatch::Deferred`: the work has not started
-        // and the job that collects its evidence does not exist, so the engine
-        // must not block waiting. Asserted as the observable form of that — the
-        // dispatch future resolves on its first poll, under a waker that can
-        // never wake it and with no runtime to drive it.
+    fn the_deferring_fixture_completes_without_yielding() {
+        // `Dispatch::Deferred` is documented to mean the work has not started
+        // and the collecting job does not exist, so the engine must not block
+        // on one. This pins the *fixture* to that shape: its dispatch resolves
+        // on a single poll, under a waker that can never wake it and with no
+        // runtime to drive it, so it suspends on nothing.
+        //
+        // It is a regression test for the reference implementation of the M4
+        // shape, not a proof about the variant. An `ActionsScheduler` that
+        // awaited before returning `Deferred` would not be caught here — see
+        // `DeferringScheduler`.
         let Poll::Ready(dispatch) = poll_once(&DeferringScheduler, batch(&["a", "b"])) else {
-            panic!("a deferring scheduler must not block its caller");
+            panic!("this fixture suspends on nothing");
         };
         let Dispatch::Deferred { payload } = dispatch else {
             panic!("this scheduler defers");
@@ -434,10 +458,13 @@ mod tests {
 
     #[test]
     fn deferred_names_no_leaf_that_ran() {
-        // The distinction the two variants exist to carry. `Deferred` has no
-        // `leaf_ids` field at all, so there is no route from a deferral to a
-        // claim that anything produced evidence; the payload is opaque and
-        // addressed to the external scheduler, not to the adjudicator.
+        // The half of the contract that *is* structural, and holds against
+        // every implementation rather than against a fixture. `Deferred` has
+        // no `leaf_ids` field at all, so there is no route from a deferral to
+        // a claim that anything produced evidence; the payload is opaque and
+        // addressed to the external scheduler, not to the adjudicator. Growing
+        // the variant an evidence-shaped field breaks the exhaustive match
+        // below, which is what this test is for.
         let Poll::Ready(Dispatch::Deferred { payload }) =
             poll_once(&DeferringScheduler, batch(&["only"]))
         else {
