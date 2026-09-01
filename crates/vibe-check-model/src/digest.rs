@@ -646,10 +646,10 @@ fn write_canonical(
             // `serde_json::to_string`: JCS orders keys by UTF-16 code unit, and
             // Rust's `str` ordering is by UTF-8 byte, which is code-point order.
             // They agree across the BMP and disagree above it.
-            let mut keys: Vec<&String> = map.keys().collect();
-            keys.sort_by(|a, b| a.encode_utf16().cmp(b.encode_utf16()));
+            let mut entries: Vec<(&String, &Value)> = map.iter().collect();
+            entries.sort_by(|(a, _), (b, _)| a.encode_utf16().cmp(b.encode_utf16()));
             out.push('{');
-            for (i, key) in keys.into_iter().enumerate() {
+            for (i, (key, child)) in entries.into_iter().enumerate() {
                 if i > 0 {
                     out.push(',');
                 }
@@ -658,7 +658,6 @@ fn write_canonical(
                 let len = path.len();
                 path.push('/');
                 path.push_str(key);
-                let Some(child) = map.get(key) else { continue };
                 write_canonical(out, child, path)?;
                 path.truncate(len);
             }
@@ -1023,6 +1022,30 @@ mod tests {
         for p in BUNDLE_ID_EXCLUDED_PATHS {
             assert!(p.reason.len() > 20, "`{}` has no reason", p.path);
             assert!(excluded.insert(p.path), "`{}` appears twice", p.path);
+        }
+    }
+
+    #[test]
+    fn no_live_inclusion_path_is_a_prefix_of_another() {
+        // `project` grafts each path in turn. Listing both `core` and
+        // `core/tier` would have the wholesale entry overwrite the narrow one
+        // or the reverse depending on order, so the digest would silently
+        // depend on the order of a list nobody thinks of as ordered. Two
+        // entries in that relationship are also a contradiction: one of them
+        // says a subtree is covered and the other says only part of it is.
+        for a in VERDICT_DIGEST_PATHS {
+            for b in VERDICT_DIGEST_PATHS {
+                if a.path == b.path {
+                    continue;
+                }
+                assert!(
+                    !b.path.starts_with(&format!("{}/", a.path)),
+                    "`{}` is a prefix of `{}`; one of them is redundant and \
+                     which one wins depends on list order",
+                    a.path,
+                    b.path
+                );
+            }
         }
     }
 
