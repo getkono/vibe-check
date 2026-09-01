@@ -15,12 +15,23 @@
 //! That is deliberate. Exiting `0` for "not implemented yet" would be
 //! indistinguishable from "this change is fine", which is exactly the confusion
 //! this tool exists to remove from other people's pipelines.
+//!
+//! A panic is held to the same rule. [`panic::run_guarded`] is what both
+//! binaries actually call: it turns an unwind into [`exit::FAILURE`] and a
+//! minimal bundle, so no panic *inside* [`run`] reaches a process exit code the
+//! contract in [`exit`] does not describe. Two things sit outside that
+//! guarantee and are documented on `run_guarded` rather than papered over here:
+//! everything each binary does before entering the guard — installing the
+//! `color_eyre` and panic hooks, initialising tracing, and parsing arguments,
+//! the last of which is clap's `2`; and a process killed by a signal, which is
+//! not an exit code at all.
 
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
 
 pub mod assembly;
 pub mod cli;
 pub mod exit;
+pub mod panic;
 pub mod scheduler;
 
 use eyre::Result;
@@ -37,6 +48,11 @@ pub use cli::{Cli, Command};
 /// # Errors
 /// Returns an error when the requested command cannot be completed.
 pub async fn run(cli: Cli) -> Result<u8> {
+    // The deliberate-panic seam, read here because this is the deepest point
+    // both binaries share, so a requested panic travels exactly the path a real
+    // one would. Inert unless `VIBE_CHECK_PANIC` is set; see [`panic`].
+    panic::panic_if_requested();
+
     let registrations = assembly::builtin();
     tracing::debug!(
         command = cli.command.name(),
