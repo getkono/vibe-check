@@ -111,11 +111,29 @@ pub enum ScopeError {
         path: Utf8PathBuf,
     },
 
+    /// A path contained a `\`.
+    ///
+    /// Rejected on every platform rather than only where it is not a separator:
+    /// `a\b` is one component on Linux and two on Windows, so accepting it
+    /// would make the digest input depend on where the run happened.
+    #[error(
+        "a scope path must use `/` and must not contain `\\`, \
+         found one at byte {at} of {path:?}"
+    )]
+    BackslashSeparator {
+        /// The offending path.
+        path: Utf8PathBuf,
+        /// Byte offset of the backslash.
+        at: usize,
+    },
+
     /// A path was not a repository-relative path in normal form: it was
-    /// absolute, or contained `.`, `..`, or an empty component.
+    /// absolute, carried a drive prefix, or contained `.`, `..`, or an empty
+    /// component.
     #[error(
         "a scope path must be repository-relative and already normalized — \
-         no `.`, no `..`, no `//`, no leading `/` — found {path:?}"
+         no `.`, no `..`, no `//`, no leading `/`, no `c:` drive prefix — \
+         found {path:?}"
     )]
     NotNormalized {
         /// The offending path.
@@ -342,19 +360,48 @@ fn check_path(path: Utf8PathBuf) -> Result<Utf8PathBuf, ScopeError> {
         return Err(ScopeError::TrailingSlash { path });
     }
 
+    // `\` is rejected outright rather than left to `components()`, which is the
+    // one place this check could otherwise disagree with itself across
+    // platforms: on Windows `a\b` is two components and on Linux it is one, so
+    // the same scope would digest different bytes depending on where the run
+    // happened. The digest input is a `/`-joined string on every platform, so
+    // the rule admitting things into it is too.
+    if let Some(at) = raw.find('\\') {
+        return Err(ScopeError::BackslashSeparator { path, at });
+    }
+
+    // The same divergence in the other direction, and it is the reason a
+    // backslash check alone is not enough: `c:/x` is an ordinary two-component
+    // relative path on Linux and a *drive prefix* on Windows, where
+    // `components()` yields `Prefix` and the loop below rejects it. Accepting it
+    // here and rejecting it there is a scope that is legal depending on the
+    // host — so it is rejected on both.
+    let first_segment = raw.split('/').next().unwrap_or(raw);
+    let bytes = first_segment.as_bytes();
+    if bytes.len() >= 2 && bytes[1] == b':' && bytes[0].is_ascii_alphabetic() {
+        return Err(ScopeError::NotNormalized { path });
+    }
+
     // Re-spelling the path from its own components catches everything left in
     // one comparison: a `.` or `..` component, a `//` that `components()`
     // collapses, a leading `/`, and a Windows-style prefix. If the components
     // do not spell the input back exactly, the input was not in normal form —
     // whatever the reason.
-    let mut normalized = Utf8PathBuf::new();
+    //
+    // Joined by hand with `/` rather than with `Utf8PathBuf::push`, which joins
+    // with the *platform* separator. `push` would re-spell
+    // `crates/kono-core/src/lib.rs` as `crates\kono-core\src\lib.rs` on
+    // Windows and then reject it for not matching itself — an acceptance rule
+    // that depends on the host is a rule that decides what a *digest* contains
+    // based on where the run happened.
+    let mut parts: Vec<&str> = Vec::new();
     for component in Utf8Path::new(raw).components() {
         match component {
-            Utf8Component::Normal(part) => normalized.push(part),
+            Utf8Component::Normal(part) => parts.push(part),
             _ => return Err(ScopeError::NotNormalized { path }),
         }
     }
-    if normalized.as_str() != raw {
+    if parts.join("/") != raw {
         return Err(ScopeError::NotNormalized { path });
     }
 
@@ -437,7 +484,30 @@ mod tests {
                 path: "src/".into()
             }
         );
-        for bad in [".", "..", "/etc/passwd", "a//b", "a/./b", "a/.."] {
+        assert_eq!(
+            scope(&[], &["a\\b"]).expect_err("a backslash"),
+            ScopeError::BackslashSeparator {
+                path: "a\\b".into(),
+                at: 1
+            },
+            "one component on Linux, two on Windows — rejected on both"
+        );
+        // `c:/x` and `a\b` are the two shapes whose *meaning* depends on the
+        // host: a drive prefix and a second component respectively on Windows,
+        // ordinary characters on Linux. Rejected on both, so a scope accepted
+        // on one platform is accepted on every platform — and the digest input
+        // is the same string wherever the run happened.
+        for bad in [
+            ".",
+            "..",
+            "/etc/passwd",
+            "a//b",
+            "a/./b",
+            "a/..",
+            "a\\b",
+            "c:/x",
+            "c:x",
+        ] {
             assert!(
                 scope(&[], &[bad]).is_err(),
                 "{bad:?} must not be a scope path"
