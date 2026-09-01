@@ -1,4 +1,116 @@
+# release-plz configuration. How a release actually happens — merge the
+# version-bump pull request, get a tag and a GitHub release, never bump or tag
+# by hand — is `AGENTS.md` §12. This file records the decisions underneath it:
+# what a version covers, what a release consists of, and who owns the changelog.
+
+# ── Versioning: one version for the whole workspace ──────────────────────────
+#
+# Nothing here provides that, and nothing here should claim to. All five crates
+# carry `version.workspace = true`, and release-plz honours the inheritance
+# directly: it collects the packages whose manifest inherits its version, takes
+# the highest next version among them, and assigns that one version to all of
+# them. The workspace already resolves upward, unaided.
+#
+# `version_group` — release-plz's mechanism for giving a *subset* of a workspace
+# one shared version — is therefore deliberately absent. Listing these five
+# crates in a group would be dead configuration: the inherited-version branch is
+# matched before the group is ever looked up, so the group would never be
+# consulted. It would not be harmless dead configuration either, because a name
+# in that list that no longer matches a crate is a hard config error, and
+# `mise run check` never reads this file.
+#
+# Why one version is the right answer anyway, should the inheritance ever be
+# revisited: every crate is `publish = false`, the internal dependencies are
+# path-only (`Cargo.toml`, `[workspace.dependencies]`), and exactly one package
+# ships anything — `vibe-check`, which produces two binaries, `vibe-check` and
+# `cargo-vibe-check`. An independent release cadence for crates nobody can
+# depend on independently buys nothing.
+#
+# Revisit alongside the crates.io decision (#6). If this workspace is ever
+# published, downstream consumers *can* depend on the crates independently, and
+# the tradeoff genuinely changes.
+
+# ── Releases: one tag and one GitHub release per merge ───────────────────────
+#
+# release-plz reaches for the package-prefixed tag template
+# `{{ package }}-v{{ version }}` whenever more than one package is
+# release-enabled. The count is of packages release-plz will act on;
+# `publish = false` does not reduce it, because `publish` only means "do not run
+# `cargo publish`". Left at the defaults, this workspace therefore cuts five
+# tags and five GitHub releases every cycle — which is not the single release
+# `AGENTS.md` §12 describes.
+#
+# So the template is stated explicitly, and tagging and releasing are off by
+# default and switched back on for exactly one package. That polarity is the
+# load-bearing part. Naming a shared tag while several packages stay
+# release-enabled does NOT produce one tag: release-plz computes the tag per
+# package and skips any package whose tag already exists, reporting it as
+# already published. The first package would tag and the rest would become
+# silent no-ops — the right outcome reached by collision, with logs that do not
+# say so. One tag has to come from one package being enabled.
+#
+# Off-by-default also means a crate added later cannot quietly join the release.
+# It gets no tag and no release until someone says so here, which is the failure
+# direction this repository prefers everywhere else.
+
 [workspace]
-publish = false
+publish            = false
+# The single-package template, chosen rather than inherited — the inherited one
+# is per-package, for the reason above.
+git_tag_name       = "v{{ version }}"
+git_tag_enable     = false
+git_release_enable = false
+
+# The one package that ships anything, and so the one package that tags and
+# cuts a release.
+[[package]]
+name               = "vibe-check"
+git_tag_enable     = true
 git_release_enable = true
-git_tag_enable = true
+
+# Test doubles and fixture builders, a dev-dependency of this workspace and of
+# nothing else. `release = false` drops it from the release outright rather than
+# only silencing its tag and its release, so it is absent from the release list
+# instead of quietly present in it.
+[[package]]
+name    = "vibe-check-testkit"
+release = false
+
+# ── Changelog: release-plz owns it ───────────────────────────────────────────
+#
+# release-plz renders the changelog with git-cliff from this block, and nothing
+# else in this repository writes one. `convco` is only ever invoked as
+# `convco check` (`mise.toml`, `.github/workflows/ci.yml`): it lints commit
+# messages and never renders a changelog. Stating the block rather than
+# inheriting the default is the point — a taxonomy nothing declares is a
+# taxonomy nobody can check.
+#
+# `feat` and `fix` earn their own sections. Everything else falls through to
+# `Other`, as release-plz's own default does. The alternative, skipping the
+# unmatched, reads tidier and is worse: the plumbing types are a large share of
+# the history here, so a release made entirely of them would render an empty
+# body instead of saying what it contained.
+#
+# Nothing is dropped by this taxonomy. `docs`, `refactor`, `perf`, `test`,
+# `build`, `ci` and `chore` are, together with `feat` and `fix`, exactly the set
+# `convco` accepts — it rejects `revert:` and `style:` — so every commit a
+# reader could ever receive lands in one of the three groups below. Merge
+# commits land in `Other` as well: `convco` exempts them from its check, they
+# match no conventional type, and nothing here hides them.
+#
+# `header` and `body` are deliberately left at release-plz's Keep a Changelog
+# defaults.
+[changelog]
+# Inert as written, because no parser below sets `skip`. It is set anyway
+# because it stops being inert the moment one does: a `skip` swallows a breaking
+# change announced as `chore!:` or `refactor!:`, and with this on such a commit
+# survives and renders under its own conventional type marked `[**breaking**]`.
+# Checked against git-cliff 2.13.1, which is what release-plz 0.3.160 vendors.
+protect_breaking_commits = true
+# Groups are sorted alphabetically rather than rendered in declaration order, so
+# this reads Features, Fixes, Other without an explicit ordering prefix.
+commit_parsers = [
+  { message = "^feat", group = "Features" },
+  { message = "^fix", group = "Fixes" },
+  { message = "^.*", group = "Other" },
+]
