@@ -1,10 +1,17 @@
 # Determinism, enforced by the linter rather than by discipline.
 #
 # The guarantee we are protecting: same diff + same policy => same verdict.
-# Each entry below closes one way that guarantee silently breaks. The real
-# guarantee is the replay-corpus test, which asserts historical bundles still
-# produce identical verdict digests; these lints just stop you writing the bug
-# in the first place.
+# Each entry below closes one way that guarantee silently breaks. These lints
+# are all that enforces it today.
+#
+# The intended enforcement is the replay-corpus test #21 describes -- historical
+# bundles re-adjudicated to identical verdict digests. It does not exist, and it
+# is further off than its issue reads: an `EvidenceBundle` carries the output of
+# adjudication and none of its inputs, so replaying one re-derives nothing and
+# could only catch a canonicalization change. It needs the bundle to grow an
+# inputs section first (#45), and `vibe-check replay` to be implemented (#59).
+# Until then these lints and the proptests are the whole of it, and this comment
+# says so rather than crediting a test that has never run.
 #
 # Escaping a rule is `#[allow(clippy::disallowed_types)]` with a comment. That
 # is deliberately visible in review, and #10 is what makes it visible to
