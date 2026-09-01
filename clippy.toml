@@ -7,8 +7,9 @@
 # in the first place.
 #
 # Escaping a rule is `#[allow(clippy::disallowed_types)]` with a comment. That
-# is deliberately visible in review — and `allow-added` is one of the risk flags
-# vibe-check itself classifies, so we are held to our own standard.
+# is deliberately visible in review, and #10 is what makes it visible to
+# vibe-check too: it adds `allow-added` to the risk flags we classify, so from
+# then on we are held to our own standard. Today nothing classifies it.
 
 disallowed-types = [
   { path = "std::collections::HashMap", reason = "iteration order is unspecified and leaks into bundles and digests; use BTreeMap. If insertion order is ever the meaningful order, add `indexmap` back in the same commit as its first use" },
@@ -20,5 +21,5 @@ disallowed-types = [
 disallowed-methods = [
   { path = "std::time::SystemTime::now", reason = "time-dependent decisions (skip `expires`, artifact freshness) must read the head commit's committer date so verdicts replay identically; only the `clock` module may read the wall clock" },
   { path = "std::time::Instant::now", reason = "durations are display-only and excluded from digests; measure inside the `clock` module" },
-  { path = "std::fs::read_dir", reason = "directory order is filesystem-dependent; use the `fs` wrapper, which collects and sorts" },
+  { path = "std::fs::read_dir", reason = "directory order is filesystem-dependent; use camino::Utf8Path::read_dir_utf8 and sort the entries explicitly" },
 ]
