@@ -14,9 +14,39 @@
 //! second, so every hash in a golden file would be wrong on the next run.
 //!
 //! Pinning identity and dates makes the hashes deterministic, which means a
-//! snapshot can contain a real commit hash and stay meaningful. Everything here
-//! is passed explicitly rather than read from the environment, so a developer's
-//! own git configuration cannot reach in and change a test result.
+//! snapshot can contain a real commit hash and stay meaningful.
+//!
+//! # What the ambient environment can and cannot still do
+//!
+//! Identity, dates and the two config *files* are passed explicitly rather than
+//! read from the environment, and [`TestRepo::git`] additionally strips the
+//! redirection variables **that git exports into hook processes**. That is the
+//! criterion, and it is narrower than "cannot be redirected". Two things are
+//! deliberately still open, and this module should name them rather than imply a
+//! completeness it does not have:
+//!
+//! - **`GIT_OBJECT_DIRECTORY`** is a fourth redirection variable and is *not*
+//!   stripped. Measured with the fix applied and the variable aimed at another
+//!   repository: that repository's loose objects went 3 -> 8, and the fixture's
+//!   own `.git/objects` was never created, leaving the fixture unopenable once
+//!   the variable was unset. It is not exported into `pre-commit`,
+//!   `post-commit` or `pre-push` by git 2.55 — the only `GIT_*` variables those
+//!   receive are `GIT_DIR`, `GIT_INDEX_FILE`, `GIT_PREFIX`, `GIT_EXEC_PATH` and
+//!   `GIT_EDITOR` — so nothing reaches it today. `GIT_COMMON_DIR`,
+//!   `GIT_NAMESPACE`, `GIT_ALTERNATE_OBJECT_DIRECTORIES` and
+//!   `GIT_CEILING_DIRECTORIES` disturbed nothing when tested.
+//! - **Config injection.** `GIT_CONFIG_COUNT` with
+//!   `GIT_CONFIG_KEY_n`/`GIT_CONFIG_VALUE_n`, and `GIT_CONFIG_PARAMETERS`, are
+//!   separate config channels that outrank `GIT_CONFIG_GLOBAL=/dev/null` rather
+//!   than being silenced by it — and git exports the latter into hook processes
+//!   whenever anyone runs `git -c <key>=<value> ...`. So "a developer's git
+//!   configuration cannot change a test result" is false today:
+//!   `init.defaultObjectFormat=sha256` injected this way fails 7 of 9
+//!   `vibe-check-diff` tests, in-process, where no `Command` neutralization can
+//!   reach.
+//!
+//! Closing either means building the child environment from empty with an
+//! allowlist, which is a larger change than the redirection fix below.
 
 use std::process::Command;
 
@@ -160,6 +190,39 @@ impl TestRepo {
             // Neutralize the ambient environment. A developer's global git
             // configuration must not be able to change a test outcome — the same
             // reasoning that makes vibe-check itself pin these when it shells out.
+            //
+            // `GIT_DIR`, `GIT_WORK_TREE` and `GIT_INDEX_FILE` are *removed*
+            // rather than pinned, because they are not configuration, they are
+            // redirection: each one outranks `current_dir`, so an inherited one
+            // aims the commands below at a repository, a worktree or an index
+            // that the fixture never created.
+            //
+            // They arrive from git itself. Measured on git 2.55:
+            //
+            // - From a **linked worktree**, which is how this repository is
+            //   developed, `GIT_DIR` is exported to the pre-commit, post-commit,
+            //   post-index-change and pre-push hooks, and `GIT_INDEX_FILE` to
+            //   the commit-time ones. Both values are **absolute**.
+            // - From a flat clone `GIT_DIR` is empty in all of them, but
+            //   `GIT_INDEX_FILE` is still exported to pre-commit and
+            //   post-commit — as the **relative** `.git/index`.
+            //
+            // The relative case is why a flat clone looks innocent. Git resolves
+            // a relative `GIT_INDEX_FILE` against the child's working directory,
+            // and `current_dir` above pins that to the fixture's own temporary
+            // directory, so `.git/index` lands on the fixture's own index and
+            // cannot reach out. Only the linked-worktree value is absolute, and
+            // an absolute one ignores `current_dir` entirely. That is precisely
+            // what makes the worktree case the dangerous one — and why anyone
+            // reproducing this in a plain clone concludes there is nothing here.
+            //
+            // The `hk` pre-push hook runs `mise run test`. Pushing from a
+            // worktree therefore pointed this crate's fixtures at the real
+            // checkout: `git init` reinitialized it, and `git add --all` wrote
+            // the fixture's files over its index.
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .env_remove("GIT_INDEX_FILE")
             .env("GIT_CONFIG_GLOBAL", "/dev/null")
             .env("GIT_CONFIG_SYSTEM", "/dev/null")
             .env("GIT_AUTHOR_NAME", AUTHOR_NAME)
