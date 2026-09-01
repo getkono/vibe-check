@@ -11,7 +11,8 @@ run, and adjudicates a verdict.
 > and no code in this workspace that talks to a forge over the network.
 >
 > Everything from here to [What exists today](#what-exists-today) describes the
-> design being built. That section says which of it runs.
+> design being built. The exit-code contract is the part of it that already
+> works; that section says which of the rest does.
 
 ## The problem
 
@@ -25,7 +26,8 @@ request can tell the difference by looking.
 
 **vibe-check exists to make your green mean something.** It decides what a
 particular diff needs evidence of, goes and finds that evidence, and says
-`unverified` — loudly, and never as a pass — when it is not there.
+`unverified` — as a named, escalating outcome rather than a silent one — when
+it is not there.
 
 **The mechanism is adoption, not replacement.** It does not want to re-run the
 job you already run; it wants the artifact that job already uploaded. A question
@@ -37,10 +39,10 @@ a tool directly only where none does.
 - **Routing is per-diff.** What a change needs evidence of is a function of what
   it touched, not of a fixed job list. A diff that adds `unsafe` raises
   questions a documentation typo does not.
-- **`unverified` is a distinct outcome, and it can never be a pass.** "The job
-  reported success but uploaded nothing machine-readable" is a specific,
-  named, escalating state — not a green tick. So is "the artifact came from a
-  different commit", and so is "the evidence did not answer the question".
+- **`unverified` is a distinct outcome, not a green tick.** "The job reported
+  success but uploaded nothing machine-readable" is a specific, named,
+  escalating state. So is "the artifact came from a different commit", and so
+  is "the evidence did not answer the question".
 - **A pull request cannot weaken its own gates.** A change that edits the
   workflow producing its own evidence can make that evidence say anything, so
   evidence from a modified gate is attacker-controlled by construction and is
@@ -62,13 +64,28 @@ concept worth holding.
 | **adopt** | An artifact your CI already produced answered the question. | Nothing, if the answer was yes. |
 | **run** | vibe-check ran a tool to answer the question. | Nothing, if the answer was yes. |
 | **skip** | The question does not apply. | Nothing when the engine derived that — the change simply does not raise the question. `T1` when a human waived it in policy, because a change riding on a human's waiver is precisely the one that should not merge unattended. |
-| **unverified** | The question could not be answered. | Always escalates to the top tier. |
+| **unverified** | The question could not be answered. | Escalates to the top tier — of the enforcing ledger, unless the requirement was declared advisory. |
 
-Two rules sit alongside them and have no exceptions. A judgement of
-*inconclusive* escalates exactly like an unverified result, because a benchmark
-that did not converge is not a pass. And evidence that was merely *declared*
-rather than measured cannot satisfy anything, whatever it claims — an assertion
-in a configuration file is the cheapest possible way to fake a pass.
+### The one way an unanswered question does not reach the verdict
+
+A requirement may be declared **advisory**, and an advisory requirement's
+escalations accumulate in a second ledger that is reported in the bundle and
+never feeds back into the tier. So an advisory `unverified` is recorded and
+changes neither the verdict nor the exit code: to anything gating a merge on
+those, it passes. That is what declaring a requirement advisory *means*, and it
+is the only route by which an unanswered question fails to raise scrutiny.
+
+The exception to the exception is policy integrity. A requirement naming a
+capability or a parser this build does not implement is routed to the enforcing
+ledger whatever it asked for, because `advisory` written beside a misspelt
+capability name would otherwise be a two-token way to delete a gate.
+
+Two further rules sit alongside those states, subject to the same ledger choice
+and to nothing else. A judgement of *inconclusive* escalates exactly like an
+unverified result, because a benchmark that did not converge is not a pass. And
+evidence that was merely *declared* rather than measured cannot satisfy
+anything, whatever it claims — an assertion in a configuration file is the
+cheapest possible way to fake a pass.
 
 ## Verdicts and exit codes
 
@@ -118,6 +135,9 @@ $ vibe-check classify
 Location:
    crates/vibe-check/src/lib.rs:81
 
+Backtrace omitted. Run with RUST_BACKTRACE=1 environment variable to display it.
+Run with RUST_BACKTRACE=full to include source snippets.
+
 $ echo $?
 1
 ```
@@ -125,11 +145,11 @@ $ echo $?
 | built | not built |
 | --- | --- |
 | The command surface: `classify`, `plan`, `run`, `adjudicate`, `replay`, `init`, `escape`, `schema`, and the global `--base`, `--config`, `--format`, `--scheduler` flags. | Every one of their implementations. |
-| The exit-code contract above, and a panic guard that turns a crash inside a command into exit `1` and a bundle that says `human`, rather than into a `101` the table above does not own. | Any command that can reach a non-`1` exit code. |
+| The exit-code contract above, and a panic guard that turns a crash inside a command into exit `1` and a bundle that says `human`, rather than into a `101` the table above does not own. | Any subcommand that does work, and therefore the verdict codes `0`, `10`, and `20`. |
 | The vocabulary the verdict is made of: tiers, verdicts, capability resolutions, evidence, provenance, reason codes, and the bundle types. | Anything that fills them in — no diff classifier, no policy reader, no artifact parser. |
 | Reading a pull-request diff from a local git repository, against a computed merge base. | Any caller that uses it. |
 | The local scheduler, and the seam where builtins get registered. | Any registered builtin. The registry is empty. |
-| The `ForgeRead` / `ForgeWrite` port traits, and a forge that refuses every read so local runs degrade to a more cautious verdict rather than an error. | A forge that talks to GitHub. There is no HTTP client anywhere in this workspace. |
+| The `ForgeRead` / `ForgeWrite` port traits, and a forge that answers every read with a typed *unavailable* error. | A forge that talks to GitHub — there is no HTTP client anywhere in this workspace — and the wiring that would turn that unavailable error into an `unverified` resolution instead of a failure, so that a local run degrades to a more cautious verdict. |
 
 Consequently there is also no installation path yet. There is no `action.yml`,
 so this is not usable as a GitHub Action; every crate is `publish = false`, so
