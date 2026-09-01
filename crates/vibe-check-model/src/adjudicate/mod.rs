@@ -12,5 +12,5 @@
 mod accumulator;
 mod enforcement;
 
-pub use accumulator::{Adjudication, Adjudicator, Escalation};
+pub use accumulator::{Adjudication, Adjudicator, Escalation, ReplayError};
 pub use enforcement::{Adjudicators, AdvisoryAdjudication, EnforcedAdjudication, Enforcement};
