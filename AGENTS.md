@@ -26,9 +26,10 @@ Where an invariant is enforced by a **test** rather than by a type, this file
 says so. That distinction is load-bearing: it tells you whether the compiler
 will stop you or whether only `mise run test` will. Where nothing enforces an
 invariant yet, this file says "not yet enforced" and names where enforcement
-will land. Three such gaps exist today — §5 and §6 — and are listed as gaps,
-not as promises. A fourth, of a different kind, closed with #14: the unwritten
-`README.md` was a documentation gap rather than an unenforced invariant.
+will land. Three such gaps exist today — two in §5, one in §6 — and are listed
+as gaps, not as promises. A fourth, of a different kind, closed with #14: the
+unwritten `README.md` was a documentation gap rather than an unenforced
+invariant.
 
 ## 1. The workspace
 
@@ -166,6 +167,19 @@ why. The bundle half is enforced in `crates/vibe-check-model/src/bundle.rs` by
 `#[serde(flatten)] extensions` on `EvidenceBundle`, with a round-trip test
 asserting that a section this build predates is not dropped on rewrite.
 
+**The bundle half holds at the top level only, which is the section's second
+gap.**
+`EvidenceBundle` is the one type with a bag. `BundleCore`, `Generator`,
+`Adjudication`, `Escalation`, `Confidence`, `Provenance`, `EvidenceRef` and
+`Location` have neither a bag nor `deny_unknown_fields`, so serde drops an
+unknown key inside any of them on read — and since `bundle_id` is computed from
+what was read, two documents differing only below the root are one artifact as
+far as it is concerned. Nested extension bags are #28. Do not close this by
+giving `BundleCore` a flattened field: that adds a field to the permanently
+frozen vocabulary, which §1 forbids. The loss is asserted deliberately in
+`crates/vibe-check-model/tests/golden_digest.rs`, so it is recorded rather than
+believed to be absent.
+
 **The policy half is not yet enforced anywhere.** There is no policy reader in
 this workspace and `#[serde(deny_unknown_fields)]` appears nowhere in it. The
 implementer who writes the policy types owns putting `deny_unknown_fields` on
@@ -204,30 +218,44 @@ the decision clock; `crates/vibe-check-model/src/time.rs` — `DecisionTime`, th
 only shape that date may take once it is inside the model, with no `now`, no
 `Default`, no `From<Timestamp>`, and a civil date pinned to UTC so a runner's
 `TZ` cannot move an expiry; `crates/vibe-check-host/src/clock.rs` — the
-sanctioned wall-clock exception, whose every field is on the digest's exclusion
-list and is display-only; `crates/vibe-check/src/assembly.rs` and
+sanctioned wall-clock exception, whose every field is display-only and therefore
+outside `verdict_digest`, which enumerates what it covers rather than what it
+drops; `crates/vibe-check/src/assembly.rs` and
 `crates/vibe-check-model/src/bundle.rs` — `BTreeSet` and `BTreeMap` in
-everything that reaches a digest; `crates/vibe-check/src/scheduler.rs` — sorts
-completion order away, because how long each tool happened to take is not
-something anything downstream may depend on.
+everything that reaches a digest; `crates/vibe-check-model/src/digest.rs` —
+RFC 8785 canonicalization and the two digests, whose path lists are data in one
+place so that what a digest covers can be read and tested as a set;
+`crates/vibe-check/src/scheduler.rs` — sorts completion order away, because how
+long each tool happened to take is not something anything downstream may depend
+on.
 
 **Escaping one of these lints is `#[allow(clippy::disallowed_types)]` with a
-comment** naming the reason. That is deliberately visible in review — and
-`allow-added` is one of the risk flags vibe-check itself classifies, so we are
-held to our own standard.
+comment** naming the reason. That is deliberately visible in review, and #10
+makes it visible to vibe-check as well by adding `allow-added` to the risk flags
+we classify — after which we are held to our own standard. Nothing classifies it
+today.
 
-Two gaps, stated plainly:
+One gap, and one non-gap, stated plainly:
 
 - **The replay-corpus test does not exist.** `clippy.toml` describes it as "the
-  real guarantee", and `BundleCore::verdict_digest` is declared in
-  `crates/vibe-check-model/src/bundle.rs` and never computed anywhere in the
-  workspace. `vibe-check replay` is declared in `crates/vibe-check/src/cli.rs`
-  and unimplemented. Enforcement lands with the milestone that writes the first
-  bundle; until then determinism rests on the lints and the proptests alone.
-- **The `fs` wrapper does not exist.** `clippy.toml` tells you to use it instead
-  of `std::fs::read_dir`, and there is no such module. Whoever needs the first
-  directory walk owns writing it — in `vibe-check-host`, alongside the other
-  side-effect ports — rather than allowing the lint.
+  real guarantee". `verdict_digest` and `bundle_id` are now computed
+  (`crates/vibe-check-model/src/digest.rs`, over RFC 8785 canonical JSON) and
+  one golden bundle is committed with both its digests
+  (`crates/vibe-check-model/tests/golden/bundle.json`), so a canonicalization
+  change fails visibly. What is still missing is the corpus: nothing in the
+  workspace *writes* a bundle, one document is not a population, and
+  `vibe-check replay` is declared in `crates/vibe-check/src/cli.rs` and
+  unimplemented. Enforcement lands with the milestone that writes the first
+  bundle; until then determinism rests on the lints, the proptests, and that
+  single golden.
+- **There is no `fs` wrapper, and nothing needs one.** The lint bans
+  `std::fs::read_dir`; the three tests that walk a directory
+  (`no_evidence_from_status.rs`, `bundle_core_construction.rs`,
+  `no_key_parser_or_tui_in_the_tree.rs`) call `camino::Utf8Path::read_dir_utf8`
+  and sort the collected paths in the caller, so none of them allows the lint.
+  If a caller ever wants that collect-and-sort factored out, it belongs in
+  `vibe-check-host`, alongside the other side-effect ports — but a module for
+  zero callers is the same disease this section is about.
 
 ## 7. Authority is a type, not a flag
 
@@ -327,7 +355,10 @@ Standing rules:
   owns the user-facing version, and carries it (#14).
 
 Tests run hermetically and without network access, because they run on the
-pre-push hook. Anything slow or networked belongs behind an `e2e` feature.
+pre-push hook. No crate has a `[features]` table, and `lint`, `lint-fix` and
+`test` all pass `--all-features`, so a feature gate would hold nothing back
+today. Prefer `#[ignore]` plus a `test-slow` task; #16 owns the decision, and
+`mise.toml` records what choosing a feature gate would cost instead.
 
 ## 10. Dependencies
 

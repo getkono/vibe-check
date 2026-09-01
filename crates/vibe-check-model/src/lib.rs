@@ -34,6 +34,7 @@
 
 pub mod adjudicate;
 pub mod bundle;
+pub mod digest;
 pub mod evidence;
 pub mod ids;
 pub mod known;
@@ -41,6 +42,7 @@ pub mod location;
 pub mod reason;
 pub mod resolution;
 pub mod schema;
+pub mod scope;
 pub mod tier;
 pub mod time;
 
@@ -49,13 +51,18 @@ pub use adjudicate::{
     Enforcement, Escalation,
 };
 pub use bundle::{BundleCore, Confidence, EvidenceBundle, Generator};
+pub use digest::{
+    BUNDLE_ID_EXCLUDED_PATHS, CanonicalError, DEFERRED_VERDICT_DIGEST_PATHS, Digest, DigestError,
+    DigestParseError, DigestPath, VERDICT_DIGEST_PATHS, bundle_id, canonicalize, digest_of,
+    verdict_digest,
+};
 pub use evidence::{
     CaseOutcome, CaseStatus, Evidence, EvidenceFacts, LocatedFinding, Metric, ParsedEvidence,
     Provenance, RawRef, Severity,
 };
 pub use ids::{
     AdoptionSourceId, AnalyzerId, CapabilityId, CrateId, FactKey, LaneId, LeafId, LeafIdError,
-    MetricKey, ParserId, RequirementId, RiskFlagId, RuleId,
+    MetricKey, ParserId, RequirementId, RequirementIdError, RiskFlagId, RuleId,
 };
 pub use known::{Known, UnknownKind};
 pub use location::{LineRange, Location};
@@ -64,5 +71,6 @@ pub use resolution::{
     CapabilityResolution, Judgement, ResolutionState, Resolutions, SkipReason, UnverifiedReason,
 };
 pub use schema::SchemaVersion;
+pub use scope::{RequirementScope, ScopeError};
 pub use tier::{Tier, Verdict};
 pub use time::DecisionTime;

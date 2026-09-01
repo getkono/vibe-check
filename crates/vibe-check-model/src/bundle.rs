@@ -1,8 +1,9 @@
 //! The evidence bundle: one JSON document, three renderings.
 //!
-//! The bundle is the product. A pull-request comment, a static HTML artifact,
-//! and `vibe-check.json` are all views of this one value, so they cannot
-//! disagree about what happened.
+//! The bundle is the product. The Actions step summary, `vibe-check.json`, and
+//! human stdout are all views of this one value, so they cannot disagree about
+//! what happened. #12 renders all three from one function; the pull-request
+//! comment is a fourth backend of that same function, not a fourth rendering.
 //!
 //! # The frozen core
 //!
@@ -82,8 +83,9 @@ pub struct BundleCore {
     /// reintroduce exactly the blocking behaviour advisory exists to remove;
     /// the requirement is to report loudly, not to report and block.
     ///
-    /// On the digest inclusion list — see #27 and #45, which write the first
-    /// bundle and the digest that covers it.
+    /// On the digest inclusion list — see
+    /// [`VERDICT_DIGEST_PATHS`](crate::digest::VERDICT_DIGEST_PATHS), which now
+    /// names it, and #45, which writes the first bundle.
     pub advisory_tier: Tier,
     /// Every risk flag the classifier emitted, sorted.
     pub flag_ids: Vec<RiskFlagId>,
@@ -124,8 +126,19 @@ pub struct BundleCore {
     pub capability_states: BTreeMap<CapabilityId, ResolutionState>,
     /// Digest over the canonicalized verdict-bearing subtree.
     ///
-    /// Excludes timestamps and durations, so the same inputs produce the same
-    /// digest. This is what the replay test compares.
+    /// Computed by [`digest::verdict_digest`](crate::digest::verdict_digest),
+    /// which covers exactly the paths in
+    /// [`VERDICT_DIGEST_PATHS`](crate::digest::VERDICT_DIGEST_PATHS) and
+    /// nothing else. An inclusion list rather than an exclusion list, so that
+    /// adding a section to the bundle cannot change a historical digest and
+    /// fail the replay corpus over something that is not a verdict. Timestamps
+    /// and durations are outside it by construction. This is what the replay
+    /// test compares.
+    ///
+    /// A `String` and not a
+    /// [`Digest`](crate::digest::Digest): the wire name and shape of this field
+    /// are the permanent contract, and a newtype that grew a variant or a
+    /// second rendering would put that at risk for no gain.
     pub verdict_digest: String,
 }
 
@@ -216,14 +229,29 @@ pub struct Generator {
 /// sentence, [`sentence`](Self::sentence) names the unit whenever it prints a
 /// capability count.
 ///
-/// `#[serde(default)]` at the container level, not only on the field that holds
-/// one. The bundle's `confidence` key already defaults when it is *absent*, but
-/// that does nothing for a `confidence` object written before a count existed:
-/// serde would reject the object for the missing field and take the whole
-/// bundle down with it. Counts are additive by nature, and `bundle.rs`'s own
-/// contract is additive-only within a major version.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
-#[serde(default)]
+/// Every count defaults when absent, at the container level and not only on the
+/// field that holds one. The bundle's `confidence` key already defaults when it
+/// is *absent*, but that does nothing for a `confidence` object written before a
+/// count existed: serde would reject the object for the missing field and take
+/// the whole bundle down with it. Counts are additive by nature, and
+/// `bundle.rs`'s own contract is additive-only within a major version. The
+/// `#[serde(default)]` that arranges this now sits on the private mirror struct
+/// inside [`Confidence`'s `Deserialize`](Confidence#impl-Deserialize%3C'de%3E-for-Confidence),
+/// which is hand-written — see below.
+///
+/// # Reconstruction is checked
+///
+/// [`tally`](Self::tally) and [`tally_by_capability`](Self::tally_by_capability)
+/// are the only producers, and both count each requirement into exactly one
+/// state, so `requirements` is always the sum of the four state counts.
+/// `Deserialize` is hand-written so that reading a recorded confidence back
+/// admits only what a tally could have produced. Without it a bundle could
+/// carry `1 requirement · 9 adopted · 9 unverified`, and
+/// [`sentence`](Self::sentence) would print it, because the sentence is
+/// generated from the counts and therefore cannot notice that the counts are
+/// impossible. See [`ConfidenceError`] for the four laws and for why a
+/// violation is refused rather than repaired.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize)]
 #[non_exhaustive]
 pub struct Confidence {
     /// Total requirements considered.
@@ -449,6 +477,205 @@ impl Confidence {
     }
 }
 
+/// Why a recorded [`Confidence`] is not one a tally could have produced.
+///
+/// # Why a violating document is refused, not repaired
+///
+/// The same argument as
+/// [`ReplayError`](crate::adjudicate::ReplayError), which states it at length,
+/// and one addition specific to counts.
+///
+/// The four state counts partition the requirements because
+/// [`ResolutionState`] is one of the model's deliberately closed enums — a fifth
+/// state is a schema-major change, not an additive one, so no *newer* build
+/// within this major can legitimately write a `requirements` that exceeds its
+/// own four counts. The counts that a newer build may add are the ones this
+/// struct already demonstrates: [`advisory`](Confidence::advisory), which is
+/// orthogonal and "does not sum with them", and
+/// [`partial`](Confidence::partial)/[`capabilities`](Confidence::capabilities),
+/// which are over a different unit. None of them joins the sum, so checking the
+/// sum does not make this reader reject the future.
+///
+/// It is worth being explicit that this one is *not* a safety gate.
+/// [`Confidence`] never reaches a verdict; it reaches
+/// [`sentence`](Confidence::sentence). Refusing it is still right, because the
+/// sentence is the caveat a reader weighs the verdict against, and a fabricated
+/// caveat is read with the same trust as a measured one — "8 requirements, 0
+/// unverified" over a run where four went unanswered is a confidence claim no
+/// tally made. There is nothing to degrade to: the counts are the whole
+/// statement.
+#[derive(Clone, PartialEq, Eq, Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum ConfidenceError {
+    /// The four state counts do not add up to the requirement count.
+    ///
+    /// `count` increments `requirements` once and exactly one state count per
+    /// requirement, so the two are equal by construction.
+    #[error(
+        "{requirements} requirements, but the state counts sum to {sum} \
+         ({adopted} adopted, {ran} run, {skipped} skipped, {unverified} unverified)"
+    )]
+    StatesDoNotSum {
+        /// The recorded requirement count.
+        requirements: usize,
+        /// What the four state counts actually add up to, or `None` on overflow.
+        sum: SumOrOverflow,
+        /// Answered by an existing artifact.
+        adopted: usize,
+        /// Answered by running something.
+        ran: usize,
+        /// Declared not applicable.
+        skipped: usize,
+        /// Expected and unavailable.
+        unverified: usize,
+    },
+    /// More requirements were advisory than there were requirements.
+    ///
+    /// `count` increments `advisory` at most once per requirement.
+    #[error("{advisory} advisory requirements out of {requirements}")]
+    MoreAdvisoryThanRequirements {
+        /// The recorded advisory count.
+        advisory: usize,
+        /// The recorded requirement count.
+        requirements: usize,
+    },
+    /// More capabilities were covered than there were requirements to cover
+    /// them.
+    ///
+    /// `tally_by_capability` keys a map by capability while counting one
+    /// requirement per entry inserted, so the map is never larger than the
+    /// count.
+    #[error("{capabilities} capabilities across {requirements} requirements")]
+    MoreCapabilitiesThanRequirements {
+        /// The recorded capability count.
+        capabilities: usize,
+        /// The recorded requirement count.
+        requirements: usize,
+    },
+    /// More capabilities disagreed across their scopes than were grouped.
+    ///
+    /// `partial` counts a subset of the entries `capabilities` counts. This is
+    /// also the case the `capabilities` field was added to make legible: with
+    /// `capabilities == 0` a non-zero `partial` claims a disagreement inside a
+    /// grouping that never happened.
+    #[error("{partial} capabilities partial across scopes, out of {capabilities} grouped")]
+    MorePartialThanCapabilities {
+        /// The recorded partial count.
+        partial: usize,
+        /// The recorded capability count.
+        capabilities: usize,
+    },
+}
+
+/// The sum of the four state counts, or the fact that it overflowed.
+///
+/// A separate type rather than an `Option<usize>` so the error message reads as
+/// a sentence either way. Overflow is only reachable from a hand-written
+/// document — no tally can count past `usize::MAX` requirements — and it is a
+/// violation like any other, not a reason to wrap around into a sum that
+/// happens to match.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SumOrOverflow {
+    /// The four counts added up.
+    Sum(usize),
+    /// They did not fit in a `usize`.
+    Overflowed,
+}
+
+impl core::fmt::Display for SumOrOverflow {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Sum(n) => write!(f, "{n}"),
+            Self::Overflowed => f.write_str("more than a `usize` can hold"),
+        }
+    }
+}
+
+// Hand-written rather than derived, so the check runs on the wire — the same
+// move as `LeafId` and as `Adjudication`, for the reasons on `ConfidenceError`.
+//
+// `#[serde(default)]` moves here from the public struct and keeps its meaning
+// exactly: a `confidence` object written before a count existed still reads. The
+// mirror is deliberately not `deny_unknown_fields` — bundles preserve rather
+// than reject what they do not understand, and the derived impl this replaces
+// ignored unknown keys.
+impl<'de> Deserialize<'de> for Confidence {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Default, Deserialize)]
+        #[serde(default)]
+        struct Wire {
+            requirements: usize,
+            adopted: usize,
+            ran: usize,
+            skipped: usize,
+            unverified: usize,
+            partial: usize,
+            advisory: usize,
+            capabilities: usize,
+        }
+
+        let w = Wire::deserialize(deserializer)?;
+        let confidence = Self {
+            requirements: w.requirements,
+            adopted: w.adopted,
+            ran: w.ran,
+            skipped: w.skipped,
+            unverified: w.unverified,
+            partial: w.partial,
+            advisory: w.advisory,
+            capabilities: w.capabilities,
+        };
+        confidence.check().map_err(serde::de::Error::custom)?;
+        Ok(confidence)
+    }
+}
+
+impl Confidence {
+    /// Whether these counts are ones a tally could have produced.
+    ///
+    /// Private, and reachable only from [`Deserialize`]: a checker in front of
+    /// the wire, not a third constructor.
+    fn check(&self) -> Result<(), ConfidenceError> {
+        let sum = self
+            .adopted
+            .checked_add(self.ran)
+            .and_then(|n| n.checked_add(self.skipped))
+            .and_then(|n| n.checked_add(self.unverified));
+        if sum != Some(self.requirements) {
+            return Err(ConfidenceError::StatesDoNotSum {
+                requirements: self.requirements,
+                sum: sum.map_or(SumOrOverflow::Overflowed, SumOrOverflow::Sum),
+                adopted: self.adopted,
+                ran: self.ran,
+                skipped: self.skipped,
+                unverified: self.unverified,
+            });
+        }
+        if self.advisory > self.requirements {
+            return Err(ConfidenceError::MoreAdvisoryThanRequirements {
+                advisory: self.advisory,
+                requirements: self.requirements,
+            });
+        }
+        if self.capabilities > self.requirements {
+            return Err(ConfidenceError::MoreCapabilitiesThanRequirements {
+                capabilities: self.capabilities,
+                requirements: self.requirements,
+            });
+        }
+        if self.partial > self.capabilities {
+            return Err(ConfidenceError::MorePartialThanCapabilities {
+                partial: self.partial,
+                capabilities: self.capabilities,
+            });
+        }
+        Ok(())
+    }
+}
+
 /// The complete record of one evaluation.
 ///
 /// Read leniently: unknown fields are preserved rather than rejected, so that an
@@ -590,9 +817,9 @@ mod tests {
     #[test]
     fn the_advisory_tier_is_written_in_the_documented_wire_form() {
         // The escape-rate loop parses this JSON, not this crate's types, so the
-        // form is the contract. There is no digest in this workspace yet — see
-        // #45, which writes the first bundle and must add `advisory_tier` to the
-        // digest inclusion list — so the wire form is what can be proved here.
+        // form is the contract. `core/advisory_tier` is now on the inclusion
+        // list in `crate::digest`, which has its own test that every listed
+        // path resolves; what is proved *here* is the wire form the loop reads.
         let json = serde_json::to_value(bundle()).expect("serialize");
         let core = json.get("core").expect("core present");
 
