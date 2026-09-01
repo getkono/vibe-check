@@ -49,8 +49,22 @@ pub struct Leaf {
 pub enum Dispatch {
     /// The leaves ran here, and their evidence is available now.
     Completed {
-        /// Identifiers of leaves that ran.
+        /// Identifiers of leaves that ran to a conclusion.
         leaf_ids: Vec<LeafId>,
+        /// Identifiers of leaves whose task panicked.
+        ///
+        /// Disjoint from `leaf_ids`, and together
+        /// with it a complete account of everything that was dispatched. That
+        /// totality is the point: without it a leaf that panicked is
+        /// indistinguishable from a leaf that was never scheduled, and the two
+        /// need different answers — the first has a defect to report against
+        /// the tool, the second has a plan that never asked for it.
+        ///
+        /// This is not a second failure channel. A tool that runs and fails is
+        /// an ordinary result and appears in `leaf_ids`; this list is only for
+        /// the leaves whose *harness* came apart, which produces no evidence at
+        /// all and therefore leaves a capability unverified.
+        panicked: Vec<LeafId>,
     },
     /// The leaves were handed to an external scheduler.
     ///
