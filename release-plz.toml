@@ -1,4 +1,97 @@
+# release-plz configuration. How a release actually happens — merge the
+# version-bump pull request, get a tag and a GitHub release, never bump or tag
+# by hand — is `AGENTS.md` §12. This file records the two decisions underneath
+# it: what a version covers, and who owns the changelog.
+
+# ── Versioning: one version for the whole workspace ──────────────────────────
+#
+# release-plz versions each crate in a workspace independently by default.
+# `version_group` is how that is turned off: packages sharing a group are all
+# assigned the same next version — the highest any of them earned. Every crate
+# in this workspace is in the one group, declared per crate at the bottom of
+# this file.
+#
+# Why a single version. Every crate is `publish = false`, the internal
+# dependencies are path-only (`Cargo.toml`, `[workspace.dependencies]`), and
+# exactly one artifact ships: the `vibe-check` binary. Per-crate versions buy an
+# independent release cadence for crates nobody can depend on independently.
+#
+# Here they would also buy a tag collision. release-plz picks the package-
+# prefixed tag template `{{ package }}-v{{ version }}` only for workspaces with
+# more than one *public* package; every crate here is `publish = false`, so no
+# package is public and the template resolves to plain `v{{ version }}` for all
+# five. One version means one tag per release, which is what that template can
+# express. Five independent versions would mean five crates competing for one
+# tag name.
+#
+# This is not redundant with `version.workspace = true` in `Cargo.toml`. Cargo
+# gives the five crates one version *field*; release-plz still computes a next
+# version per crate, and without a group, two crates that earned different bumps
+# disagree about what that one field should become. The group is what resolves
+# the disagreement, and it resolves it upward.
+#
+# ADDING A CRATE MEANS ADDING IT BELOW. release-plz has no workspace-level
+# `version_group` — the key exists only in `[[package]]` — so a crate left out
+# of that list is versioned on its own, silently and without an error.
+#
+# Revisit alongside the crates.io decision (#6). If this workspace is ever
+# published, downstream consumers *can* depend on the crates independently, and
+# the tradeoff genuinely changes.
+
 [workspace]
-publish = false
+publish            = false
 git_release_enable = true
-git_tag_enable = true
+git_tag_enable     = true
+
+# ── Changelog: release-plz owns it ───────────────────────────────────────────
+#
+# release-plz renders the changelog with git-cliff from this block, and nothing
+# else in this repository writes one. `convco` is only ever invoked as
+# `convco check` (`mise.toml`, `.github/workflows/ci.yml`): it lints commit
+# messages and never renders a changelog. Stating the block rather than
+# inheriting the default is the point — a taxonomy nothing declares is a
+# taxonomy nobody can check.
+#
+# `feat` and `fix` are the only types a reader of the release list is served by;
+# docs, refactor, perf, test, build, ci and chore are release plumbing. `header`
+# and `body` are deliberately left at release-plz's Keep a Changelog defaults.
+[changelog]
+# The catch-all `skip` below would otherwise swallow a breaking change announced
+# as `chore!:` or `refactor!:` — the single entry a reader cannot afford to
+# miss. With this on, such a commit survives the skip and renders under its own
+# conventional type, marked `[**breaking**]`. That behaviour is not obvious from
+# the key's name, so it was checked against git-cliff 2.13.1 directly: with the
+# key off, a `chore!:` commit is absent from the rendered changelog entirely.
+protect_breaking_commits = true
+# Groups render in alphabetical order, so Features precedes Fixes without an
+# explicit ordering prefix.
+commit_parsers = [
+  { message = "^feat", group = "Features" },
+  { message = "^fix", group = "Fixes" },
+  { message = "^.*", skip = true },
+]
+
+# ── The version group ────────────────────────────────────────────────────────
+#
+# One entry per crate under `crates/`, all in the same group. See the note above
+# before adding a crate to the workspace without adding it here.
+
+[[package]]
+name          = "vibe-check"
+version_group = "workspace"
+
+[[package]]
+name          = "vibe-check-diff"
+version_group = "workspace"
+
+[[package]]
+name          = "vibe-check-host"
+version_group = "workspace"
+
+[[package]]
+name          = "vibe-check-model"
+version_group = "workspace"
+
+[[package]]
+name          = "vibe-check-testkit"
+version_group = "workspace"
