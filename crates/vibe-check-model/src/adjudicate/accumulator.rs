@@ -18,7 +18,16 @@ use crate::reason::{EvidenceRef, ReasonCode};
 use crate::tier::{Tier, Verdict};
 
 /// One recorded rise in scrutiny.
-#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+///
+/// # Reconstruction is checked
+///
+/// [`Adjudicator::escalate`] is the only *producer*, and it computes
+/// `to = from.join(at_least)`, so `to >= from` for every escalation it writes.
+/// `Deserialize` is hand-written rather than derived so that reading one back
+/// out of a bundle admits exactly the values `escalate` could have written. See
+/// the module note on [`ReplayError`] for why a violating document is refused
+/// rather than repaired.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize)]
 #[non_exhaustive]
 pub struct Escalation {
     /// The tier before this escalation.
@@ -167,9 +176,19 @@ impl Adjudicator {
 /// A finished verdict.
 ///
 /// Immutable by construction: every field is populated by
-/// [`Adjudicator::finish`], and there is no other constructor, no `Default`, and
-/// no `From<Tier>`.
-#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+/// [`Adjudicator::finish`], and there is no other *producer* — no `new`, no
+/// `Default`, and no `From<Tier>`.
+///
+/// # Reconstruction is checked
+///
+/// This type is read back out of recorded bundles, which is the path
+/// `vibe-check replay` takes, so `Deserialize` can *reconstruct* one. That is
+/// not a second producer: it is hand-written rather than derived, and it admits
+/// only values [`Adjudicator::finish`] could have written — the verdict agrees
+/// with the tier, and the ledger replays to it. A derived `Deserialize` would
+/// have been the second producer, and the more dangerous one, because it is the
+/// one a replay reaches. See [`ReplayError`].
+#[derive(Clone, PartialEq, Eq, Debug, Serialize)]
 #[non_exhaustive]
 pub struct Adjudication {
     /// The tier reached.
@@ -207,6 +226,221 @@ impl Adjudication {
     #[must_use]
     pub fn primary_cause(&self) -> Option<&Escalation> {
         self.escalations.iter().find(|e| e.to == self.tier)
+    }
+}
+
+/// Why a recorded adjudication is not one this build can read back.
+///
+/// # Why a violating document is refused, not repaired
+///
+/// [`EvidenceRef`]'s wire-format note says a renderer meeting something it does
+/// not understand "must degrade to showing the reason code rather than failing
+/// to display a verdict", and refusing to parse is the outcome that note exists
+/// to avoid. That contract is about *unfamiliar* input — a variant, a key, or a
+/// capability written by a build newer than this one — where refusal throws away
+/// information the reader could have used. None of the three faults below is
+/// unfamiliar input.
+///
+/// Every value they range over is closed and frozen. [`Tier`] and [`Verdict`]
+/// are two of the model's deliberately closed enums, and
+/// [`Tier::verdict`](crate::tier::Tier::verdict) is total and is "the only
+/// mapping". So there is no build, present or future, that legitimately emits a
+/// document where the verdict disagrees with the tier or the ledger does not
+/// replay to it: within a schema major, such a document is corrupt or forged,
+/// never merely newer. Refusing it discards nothing true.
+///
+/// The alternative — deserialize and then escalate — is not available at this
+/// seam, and that is the decisive argument rather than a matter of taste.
+/// Escalating needs an [`Adjudicator`] to escalate *into*, and
+/// [`serde::Deserialize`] has no channel to carry one; a `Deserialize` impl can
+/// only return a value. The only value it could return is a *repaired* one —
+/// overwriting the recorded verdict with `tier.verdict()`, or the recorded tier
+/// with the ledger's replay. Repair is worse than refusal in both directions it
+/// can go: it destroys the evidence that the record was wrong, and because
+/// bundles are read and rewritten by design (see [`crate::schema`]), the next
+/// writer emits the repaired document as if it had always been consistent. A
+/// bundle that lies about its own verdict would be laundered into one that
+/// merely looks right.
+///
+/// So the choice here is [`crate::ids::LeafId`]'s: hand-write `Deserialize` and
+/// fail the parse. What is lost is a reader's ability to display the verdict of
+/// a self-contradicting bundle — and such a bundle has no verdict to display,
+/// because displaying either of its two disagreeing answers would be a guess
+/// presented as a record.
+///
+/// Tolerating genuinely *unknown* vocabulary is a different problem with a
+/// different answer, and it is #29's.
+#[derive(Clone, PartialEq, Eq, Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum ReplayError {
+    /// An escalation whose tier fell.
+    ///
+    /// [`Adjudicator::escalate`] computes `to = from.join(at_least)`, so this is
+    /// unreachable from the producer. Admitting it would make
+    /// [`Escalation::raised_tier`] — and with it the claim that scrutiny only
+    /// rises — false for a replayed ledger.
+    #[error("escalation lowers the tier, from {from} to {to}; scrutiny only rises")]
+    TierFell {
+        /// The tier the escalation claims to start from.
+        from: Tier,
+        /// The lower tier it claims to reach.
+        to: Tier,
+    },
+    /// The verdict does not agree with the tier beside it.
+    ///
+    /// [`Adjudicator::finish`] writes `verdict: self.tier.verdict()`, and
+    /// [`Tier::verdict`](crate::tier::Tier::verdict) is the only mapping there
+    /// is. `tier.rs` refuses to store the two independently precisely because
+    /// that "would admit a state where they disagree"; a derived `Deserialize`
+    /// admitted it anyway.
+    #[error("verdict {verdict:?} disagrees with tier {tier}, which implies {expected:?}")]
+    VerdictDisagrees {
+        /// The recorded tier.
+        tier: Tier,
+        /// The recorded verdict.
+        verdict: Verdict,
+        /// The verdict the recorded tier implies.
+        expected: Verdict,
+    },
+    /// An escalation does not start where the previous one ended.
+    ///
+    /// The ledger is a sequence, not a set: [`Escalation::from`] is "a statement
+    /// about the *sequence*, and the reason a finished ledger is never sorted".
+    /// Walking it from [`Tier::BOTTOM`] must visit every entry's `from` in turn,
+    /// which is what "the ledger replays" means.
+    #[error(
+        "escalation {index} starts at {found}, but the ledger had reached {expected}; \
+         the ledger does not replay"
+    )]
+    LedgerDiscontinuous {
+        /// Position of the offending escalation.
+        index: usize,
+        /// The tier the walk had reached.
+        expected: Tier,
+        /// The tier the escalation claims to start from.
+        found: Tier,
+    },
+    /// The ledger replays to a different tier than the one recorded.
+    ///
+    /// The ledger is the audit trail for the verdict. If it does not arrive at
+    /// the recorded tier, one of the two is fiction and nothing in the document
+    /// says which.
+    #[error("ledger replays to {replayed}, but the adjudication records {recorded}")]
+    LedgerDoesNotReplay {
+        /// The tier the adjudication claims.
+        recorded: Tier,
+        /// The tier its own escalations arrive at.
+        replayed: Tier,
+    },
+}
+
+// Hand-written rather than derived, so the check runs on the wire — the same
+// move as `LeafId`, for the reasons set out on `ReplayError`.
+//
+// The mirror struct is `#[derive]`d and deliberately *not*
+// `deny_unknown_fields`: bundles preserve rather than reject what they do not
+// understand (see `crate::schema`), and the derived impl this replaces ignored
+// unknown keys. Validation is about the fields that are here, not about the
+// ones that are not.
+impl<'de> Deserialize<'de> for Escalation {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct Wire {
+            from: Tier,
+            to: Tier,
+            reason: ReasonCode,
+            detail: String,
+            evidence: EvidenceRef,
+        }
+
+        let wire = Wire::deserialize(deserializer)?;
+        if wire.to < wire.from {
+            return Err(serde::de::Error::custom(ReplayError::TierFell {
+                from: wire.from,
+                to: wire.to,
+            }));
+        }
+        Ok(Self {
+            from: wire.from,
+            to: wire.to,
+            reason: wire.reason,
+            detail: wire.detail,
+            evidence: wire.evidence,
+        })
+    }
+}
+
+// The other half of the same move. Note the `escalations` field deserializes
+// through the impl above, so `to >= from` is already established for every entry
+// by the time this validates the sequence they form.
+impl<'de> Deserialize<'de> for Adjudication {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct Wire {
+            tier: Tier,
+            verdict: Verdict,
+            escalations: Vec<Escalation>,
+        }
+
+        let wire = Wire::deserialize(deserializer)?;
+        Self::from_wire(wire.tier, wire.verdict, wire.escalations).map_err(serde::de::Error::custom)
+    }
+}
+
+impl Adjudication {
+    /// Rebuild a recorded adjudication, or say why it is not one.
+    ///
+    /// Private, and reachable only from [`Deserialize`]: this is a *checker*
+    /// standing in front of the wire, not a second producer. Making it public
+    /// would hand out the `From<Tier>` the type documents itself as not having.
+    ///
+    /// The walk is exactly what `Adjudicator` does forwards. It starts at
+    /// [`Tier::BOTTOM`], because that is where `Adjudicator::new` starts, and
+    /// every entry must pick up where the last one left off — which is what
+    /// makes this the parse-time form of `ledger_replays_to_the_same_tier`.
+    fn from_wire(
+        tier: Tier,
+        verdict: Verdict,
+        escalations: Vec<Escalation>,
+    ) -> Result<Self, ReplayError> {
+        let expected = tier.verdict();
+        if verdict != expected {
+            return Err(ReplayError::VerdictDisagrees {
+                tier,
+                verdict,
+                expected,
+            });
+        }
+
+        let mut replayed = Tier::BOTTOM;
+        for (index, escalation) in escalations.iter().enumerate() {
+            if escalation.from != replayed {
+                return Err(ReplayError::LedgerDiscontinuous {
+                    index,
+                    expected: replayed,
+                    found: escalation.from,
+                });
+            }
+            replayed = escalation.to;
+        }
+        if replayed != tier {
+            return Err(ReplayError::LedgerDoesNotReplay {
+                recorded: tier,
+                replayed,
+            });
+        }
+
+        Ok(Self {
+            tier,
+            verdict,
+            escalations,
+        })
     }
 }
 
