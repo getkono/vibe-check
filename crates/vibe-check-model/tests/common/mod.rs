@@ -124,10 +124,24 @@ pub struct Function {
     /// privacy lets it assign a private field just as effectively. A rule about
     /// receivers cannot see it; this is what does.
     pub mutably_borrows: Vec<String>,
-    /// Base identifier of the return type, with `Self` resolved to [`owner`].
+    /// Base identifier of the return type, with `Self` resolved to [`owner`]
+    /// and any same-file type alias followed to the name it stands for.
+    ///
+    /// The first of [`produces`], and the same thing whenever the return type
+    /// names one component. A rule that asks "does this return an `Evidence`"
+    /// wants [`produces`]; this is for the messages and for the cases where a
+    /// single answer is the honest one.
     ///
     /// [`owner`]: Function::owner
+    /// [`produces`]: Function::produces
     pub returns: Option<String>,
+    /// Every base identifier the return type could hand back.
+    ///
+    /// A tuple returns each of its elements, so `-> (Evidence, u8)` produces an
+    /// `Evidence` — and pairing the forbidden value with a throwaway is
+    /// otherwise a one-character escape from any rule that keys on the return
+    /// type.
+    pub produces: Vec<String>,
 }
 
 impl Function {
@@ -192,17 +206,21 @@ enum Cfg {
     All(Vec<Cfg>),
     /// `any(…)`.
     Any(Vec<Cfg>),
-    /// Anything else — `feature = "e2e"`, `unix`, `debug_assertions`. Not
-    /// evaluable here, and conservatively treated as satisfied: an item behind
-    /// one ships in *some* configuration, and a guard that skipped it would be
-    /// a guard someone could hide behind a feature flag.
+    /// Anything else — `feature = "e2e"`, `unix`, `debug_assertions`.
+    ///
+    /// *Unknown*, and deliberately not the same thing as `false`. An item
+    /// behind one ships in *some* configuration, so a guard that skipped it
+    /// would be a guard someone could hide behind a feature flag — but
+    /// recording that as the two-valued `true` is worse than the hole it
+    /// closes, because `not(…)` then inverts it into `false` and the item
+    /// vanishes anyway. See [`Cfg::holds`].
     Other,
 }
 
 impl Parse for Cfg {
     fn parse(input: ParseStream) -> syn::Result<Self> {
         let path: syn::Path = input.parse()?;
-        let name = path.get_ident().map(ToString::to_string);
+        let name = path.get_ident().map(unraw);
 
         if input.peek(syn::token::Paren) {
             let inner;
@@ -234,16 +252,80 @@ impl Parse for Cfg {
     }
 }
 
+/// The whole token stream inside one `#[cfg(…)]`.
+///
+/// An attribute's argument list takes a trailing comma the way every other
+/// Rust list does: `#[cfg(test,)]` compiles, and is configured out of an
+/// ordinary build exactly like `#[cfg(test)]`. Parsing a single predicate and
+/// nothing else left the comma unconsumed, `syn::parse2` rejected the
+/// leftovers, and [`ships`] panicked on legal source — while the nested
+/// `#[cfg(all(test,))]` was accepted, because the inner list *is* read with
+/// `parse_terminated`. That asymmetry reads as an accident rather than a rule,
+/// and a guard that dies on legal code is a guard someone deletes.
+struct CfgAttr(Cfg);
+
+impl Parse for CfgAttr {
+    fn parse(input: ParseStream) -> syn::Result<Self> {
+        let list = syn::punctuated::Punctuated::<Cfg, syn::Token![,]>::parse_terminated(input)?;
+        let mut list: Vec<Cfg> = list.into_iter().collect();
+        if list.len() != 1 {
+            return Err(input.error("`cfg` takes exactly one predicate"));
+        }
+        Ok(Self(list.pop().expect("length was just checked")))
+    }
+}
+
 impl Cfg {
     /// Whether the predicate holds in an ordinary build — the one that produces
     /// the artifact people link against, in which `test` is off.
-    fn holds(&self) -> bool {
+    ///
+    /// Three-valued, and that is the whole point. `Some(true)` and
+    /// `Some(false)` are decided; `None` is *unknown*, which is what a
+    /// predicate this reader cannot evaluate actually is.
+    ///
+    /// Storing unknown as `true` — "conservatively satisfied" — is only
+    /// conservative until something negates it. `#[cfg(not(target_os =
+    /// "windows"))]` ships on every machine this workspace is built on, and
+    /// under two-valued evaluation it read as `!true`, so every item behind one
+    /// disappeared from every guard in this directory. The same held for
+    /// `#[cfg(not(feature = "e2e"))]` and for `all(not(feature = "x"), unix)`.
+    /// That is a bypass an attacker does not even have to be clever to find:
+    /// it is the ordinary way to write portable code.
+    ///
+    /// So unknown propagates instead of collapsing. `not` of unknown is
+    /// unknown. `all` is `Some(false)` as soon as one conjunct is decidedly
+    /// false — that item really is configured out — and unknown otherwise if
+    /// anything in it was unknown. `any` is the mirror image. [`ships`] then
+    /// reads unknown as shipping, which is the conservative direction *stated
+    /// once, at the end*, rather than smuggled into a leaf where a negation can
+    /// reach it.
+    fn holds(&self) -> Option<bool> {
         match self {
-            Cfg::Test => false,
-            Cfg::Not(inner) => !inner.holds(),
-            Cfg::All(list) => list.iter().all(Cfg::holds),
-            Cfg::Any(list) => list.iter().any(Cfg::holds),
-            Cfg::Other => true,
+            Cfg::Test => Some(false),
+            Cfg::Not(inner) => inner.holds().map(|value| !value),
+            Cfg::All(list) => {
+                let mut unknown = false;
+                for predicate in list {
+                    match predicate.holds() {
+                        Some(false) => return Some(false),
+                        Some(true) => {}
+                        None => unknown = true,
+                    }
+                }
+                (!unknown).then_some(true)
+            }
+            Cfg::Any(list) => {
+                let mut unknown = false;
+                for predicate in list {
+                    match predicate.holds() {
+                        Some(true) => return Some(true),
+                        Some(false) => {}
+                        None => unknown = true,
+                    }
+                }
+                (!unknown).then_some(false)
+            }
+            Cfg::Other => None,
         }
     }
 }
@@ -254,6 +336,13 @@ impl Cfg {
 /// This is *not* "does the `cfg` mention `test`". `#[cfg(not(test))]` mentions
 /// it and ships in every non-test build; treating it as test-only was a hole
 /// wide enough to hide a `From<String> for Evidence` in.
+///
+/// A predicate this reader cannot evaluate is unknown rather than false, and an
+/// item behind an unknown gate is read as shipping — it ships in *some*
+/// configuration, and the guards are about what can reach a build, not about
+/// what reaches this one. The conservative choice is made here, once, on the
+/// three-valued answer [`Cfg::holds`] returns, because making it inside the
+/// predicate put it somewhere `not(…)` could invert.
 ///
 /// # Panics
 ///
@@ -269,15 +358,27 @@ pub fn ships(attrs: &[syn::Attribute]) -> bool {
         if !list.path.is_ident("cfg") {
             return true;
         }
-        let predicate: Cfg = syn::parse2(list.tokens.clone()).unwrap_or_else(|error| {
+        let predicate: CfgAttr = syn::parse2(list.tokens.clone()).unwrap_or_else(|error| {
             panic!(
                 "a `#[cfg(…)]` this guard cannot classify is a gate it cannot \
                  reason about, and guessing is how an item vanishes from a \
                  guard silently: {error}"
             )
         });
-        predicate.holds()
+        predicate.0.holds() != Some(false)
     })
+}
+
+/// An identifier's name with any raw-identifier prefix removed.
+///
+/// `#[cfg(r#test)]` is `#[cfg(test)]`: rustc compares the symbol, and the `r#`
+/// is lexical syntax rather than part of the name. `Ident::to_string` keeps the
+/// prefix, so a comparison against `"test"` failed and the item read as
+/// shipping. That over-reports rather than under-reports — the safe direction —
+/// but a guard whose safety rests on a spelling accident is one refactor away
+/// from resting on nothing.
+fn unraw(ident: &Ident) -> String {
+    ident.to_string().trim_start_matches("r#").to_owned()
 }
 
 // --- reading a source file -------------------------------------------------
@@ -290,17 +391,59 @@ pub fn ships(attrs: &[syn::Attribute]) -> bool {
 /// are expressions rather than item lists, which declare nothing but can still
 /// construct something.
 pub struct Source {
+    label: String,
     file: syn::File,
+    arguments: Arguments,
     macro_files: Vec<syn::File>,
     macro_exprs: Vec<syn::Expr>,
     items: Vec<syn::Item>,
 }
+
+/// The identifiers each macro is invoked with, keyed by the macro's name.
+///
+/// `BTreeMap`/`BTreeSet` rather than the hashed pair: iteration order reaches a
+/// failure message, and the workspace bans the hashed containers outright for
+/// the same reason.
+pub type Arguments = std::collections::BTreeMap<String, std::collections::BTreeSet<String>>;
 
 impl Source {
     /// Every item that ships, flattened.
     #[must_use]
     pub fn items(&self) -> &[syn::Item] {
         &self.items
+    }
+
+    /// The identifiers this file passes to each macro it invokes.
+    #[must_use]
+    pub fn arguments(&self) -> &Arguments {
+        &self.arguments
+    }
+
+    /// Re-read the file, expanding its `macro_rules!` bodies against arguments
+    /// gathered from somewhere other than this file too.
+    ///
+    /// A `macro_rules!` definition and the invocation that binds its
+    /// metavariables need not share a file: `#[macro_use]` and
+    /// `#[macro_export]` both carry one across. Reading each file alone would
+    /// therefore see `impl From<$src> for $dst` as a conversion into
+    /// `metavar_dst` — a type nothing forbids — while the crate really contains
+    /// whatever the invocation named.
+    pub fn expand_against(&mut self, arguments: &Arguments) {
+        let mut merged = self.arguments.clone();
+        for (macro_name, idents) in arguments {
+            merged
+                .entry(macro_name.clone())
+                .or_default()
+                .extend(idents.iter().cloned());
+        }
+        if merged == self.arguments {
+            return;
+        }
+        let rebuilt = build(self.label.clone(), self.file.clone(), merged);
+        self.arguments = rebuilt.arguments;
+        self.macro_files = rebuilt.macro_files;
+        self.macro_exprs = rebuilt.macro_exprs;
+        self.items = rebuilt.items;
     }
 }
 
@@ -320,9 +463,18 @@ pub fn parse(label: &str, source: &str) -> syn::File {
 #[must_use]
 pub fn read(label: &str, source: &str) -> Source {
     let file = parse(label, source);
+    // The invocations have to be in hand before the definitions are expanded,
+    // because they are what the metavariables stand for. Two passes over one
+    // parse, not two parses.
+    let arguments = invocation_arguments(&file);
+    build(label.to_owned(), file, arguments)
+}
 
+/// Walk `file`, expanding each `macro_rules!` body against `arguments`.
+fn build(label: String, file: syn::File, arguments: Arguments) -> Source {
     let mut walk = ItemWalk {
-        label: label.to_owned(),
+        label: label.clone(),
+        arguments,
         items: Vec::new(),
         macro_files: Vec::new(),
         macro_exprs: Vec::new(),
@@ -338,7 +490,9 @@ pub fn read(label: &str, source: &str) -> Source {
     }
 
     Source {
+        label,
         file,
+        arguments: walk.arguments,
         macro_files: walk.macro_files,
         macro_exprs: walk.macro_exprs,
         items: walk.items,
@@ -389,14 +543,36 @@ pub fn workspace_sources() -> Vec<(Utf8PathBuf, Source)> {
         files.len()
     );
 
-    files
+    let mut sources: Vec<(Utf8PathBuf, Source)> = files
         .into_iter()
         .map(|path| {
             let text = std::fs::read_to_string(&path).expect("a listed source file is readable");
             let source = read(path.as_str(), &text);
             (path, source)
         })
-        .collect()
+        .collect();
+
+    // A `macro_rules!` definition and the invocation that binds its
+    // metavariables are not obliged to share a file — `#[macro_use]` and
+    // `#[macro_export]` are exactly the features that separate them. Reading
+    // each file in isolation would leave `impl From<$src> for $dst` looking
+    // like a conversion into `metavar_dst`, which nothing forbids, so the
+    // arguments are pooled across the workspace and every definition is
+    // expanded again against all of them.
+    let mut pooled = Arguments::new();
+    for (_, source) in &sources {
+        for (macro_name, idents) in source.arguments() {
+            pooled
+                .entry(macro_name.clone())
+                .or_default()
+                .extend(idents.iter().cloned());
+        }
+    }
+    for (_, source) in &mut sources {
+        source.expand_against(&pooled);
+    }
+
+    sources
 }
 
 /// The immediate subdirectories of `dir`, i.e. the workspace's crates.
@@ -437,9 +613,25 @@ fn collect_rs(dir: &Utf8Path, out: &mut Vec<Utf8PathBuf>) {
 
 // --- macro bodies ----------------------------------------------------------
 
-/// The expansion of each rule in a `macro_rules!` body: the token group that
-/// follows each `=>`.
-fn rule_expansions(body: &TokenStream) -> Vec<TokenStream> {
+/// One rule of a `macro_rules!` body.
+struct Rule {
+    /// The token group that follows the `=>`.
+    expansion: TokenStream,
+    /// The metavariables this rule matches that could stand for a *type name*:
+    /// the ones declared `:ty`, `:ident` or `:path`.
+    ///
+    /// Restricted to those three on purpose. Every rule in this directory keys
+    /// on a written type — the `for` target of a conversion, a return type, the
+    /// name in a struct literal — and no other fragment specifier can supply
+    /// one. `$core:expr` cannot be the target of a `From` impl, so binding it
+    /// to each identifier its invocations pass would only manufacture copies of
+    /// the same expansion for a guard to count twice.
+    names: std::collections::BTreeSet<String>,
+}
+
+/// Each rule of a `macro_rules!` body: the group after each `=>`, and the
+/// naming metavariables the matcher before it declares.
+fn rules(body: &TokenStream) -> Vec<Rule> {
     let trees: Vec<TokenTree> = body.clone().into_iter().collect();
     let mut out = Vec::new();
 
@@ -452,22 +644,120 @@ fn rule_expansions(body: &TokenStream) -> Vec<TokenStream> {
         if first.as_char() != '=' || second.as_char() != '>' {
             continue;
         }
-        if let Some(TokenTree::Group(group)) = trees.get(index + 2) {
-            out.push(group.stream());
+        let Some(TokenTree::Group(expansion)) = trees.get(index + 2) else {
+            continue;
+        };
+        let names = match index.checked_sub(1).and_then(|before| trees.get(before)) {
+            Some(TokenTree::Group(matcher)) => naming_metavariables(&matcher.stream()),
+            _ => std::collections::BTreeSet::new(),
+        };
+        out.push(Rule {
+            expansion: expansion.stream(),
+            names,
+        });
+    }
+
+    out
+}
+
+/// The `$name:ty`, `$name:ident` and `$name:path` metavariables a matcher
+/// declares, by name.
+fn naming_metavariables(matcher: &TokenStream) -> std::collections::BTreeSet<String> {
+    let trees: Vec<TokenTree> = matcher.clone().into_iter().collect();
+    let mut out = std::collections::BTreeSet::new();
+
+    for index in 0..trees.len() {
+        if let TokenTree::Group(group) = &trees[index] {
+            out.extend(naming_metavariables(&group.stream()));
+            continue;
+        }
+        let TokenTree::Punct(dollar) = &trees[index] else {
+            continue;
+        };
+        if dollar.as_char() != '$' {
+            continue;
+        }
+        let (Some(TokenTree::Ident(name)), Some(TokenTree::Punct(colon))) =
+            (trees.get(index + 1), trees.get(index + 2))
+        else {
+            continue;
+        };
+        if colon.as_char() != ':' {
+            continue;
+        }
+        let Some(TokenTree::Ident(fragment)) = trees.get(index + 3) else {
+            continue;
+        };
+        if matches!(unraw(fragment).as_str(), "ty" | "ident" | "path") {
+            out.insert(unraw(name));
         }
     }
 
     out
 }
 
-/// Replace macro metavariables with plain identifiers so an expansion parses.
+/// Whether any of `names` is actually written as a metavariable in `stream`.
 ///
-/// `$name` becomes `metavar_name`, and a `$( … )sep*` repetition is spliced in
-/// once with its operator dropped. The result is not what the macro expands to
-/// — it is a *representative* of every expansion, which is exactly what a
-/// structural guard needs: `impl From<$name> for Evidence` is the forbidden
-/// impl in each of the eleven types that macro is invoked for.
-fn substitute(stream: TokenStream) -> TokenStream {
+/// A rule that declares `$t:ty` and never uses it expands identically however
+/// `$t` is bound, so binding it would only duplicate the expansion.
+fn mentions_any(stream: &TokenStream, names: &std::collections::BTreeSet<String>) -> bool {
+    let trees: Vec<TokenTree> = stream.clone().into_iter().collect();
+    for index in 0..trees.len() {
+        match &trees[index] {
+            TokenTree::Group(group) => {
+                if mentions_any(&group.stream(), names) {
+                    return true;
+                }
+            }
+            TokenTree::Punct(punct) if punct.as_char() == '$' => {
+                if let Some(TokenTree::Ident(name)) = trees.get(index + 1)
+                    && names.contains(&unraw(name))
+                {
+                    return true;
+                }
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
+/// Replace macro metavariables so an expansion parses.
+///
+/// With `binding` absent, `$name` becomes `metavar_name` and the result is a
+/// *representative* of every expansion: `impl From<$name> for Evidence` is the
+/// forbidden impl in each of the eleven types that macro is invoked for,
+/// whatever those types are, because the rule keys on the target and the target
+/// is written out.
+///
+/// With `binding` present, every metavariable becomes that identifier instead.
+/// That is what the representative cannot do, and it is not a nicety: when the
+/// metavariable sits *where the rule keys*, the placeholder answers the wrong
+/// question.
+///
+/// ```ignore
+/// macro_rules! conv { ($src:ty => $dst:ty) => { impl From<$src> for $dst {…} }; }
+/// conv!(String => Evidence);
+/// ```
+///
+/// The representative reads as `impl From<metavar_src> for metavar_dst`, whose
+/// target is not `Evidence`, so nothing fires — while the crate really does
+/// contain `impl From<String> for Evidence`. The invocation is the only place
+/// the real name appears, and `syn` hands the invocation back as opaque tokens
+/// too, so the guard never saw it anywhere.
+///
+/// So every identifier any invocation of that macro passes is substituted in
+/// turn, one expansion each. It over-approximates — it does not track *which*
+/// metavariable an argument binds, and an argument that only ever appears in
+/// one position is tried in all of them — and over-approximating is the
+/// direction to be wrong in: the cost is a spurious `impl From<CapabilityId>
+/// for CapabilityId` that no rule mentions, and the alternative is a real
+/// `impl From<String> for Evidence` that no rule sees.
+///
+/// Only the metavariables named in [`Binding::names`] take the identifier;
+/// everything else still becomes a placeholder, so an `$expr` keeps standing
+/// for an expression rather than being rewritten into a type name.
+fn substitute(stream: TokenStream, binding: Option<&Binding<'_>>) -> TokenStream {
     let trees: Vec<TokenTree> = stream.into_iter().collect();
     let mut out: Vec<TokenTree> = Vec::new();
     let mut index = 0usize;
@@ -477,14 +767,20 @@ fn substitute(stream: TokenStream) -> TokenStream {
             TokenTree::Punct(punct) if punct.as_char() == '$' => {
                 match trees.get(index + 1) {
                     Some(TokenTree::Ident(name)) => {
+                        let replacement = match binding {
+                            Some(bound) if bound.names.contains(&unraw(name)) => {
+                                bound.ident.to_owned()
+                            }
+                            _ => format!("metavar_{name}"),
+                        };
                         out.push(TokenTree::Ident(Ident::new(
-                            &format!("metavar_{name}"),
+                            &replacement,
                             Span::call_site(),
                         )));
                         index += 2;
                     }
                     Some(TokenTree::Group(group)) => {
-                        out.extend(substitute(group.stream()));
+                        out.extend(substitute(group.stream(), binding));
                         index += 2;
                         // Drop an optional separator and the repetition
                         // operator that follow: `$( … ),*` and `$( … )*` alike.
@@ -510,7 +806,7 @@ fn substitute(stream: TokenStream) -> TokenStream {
             TokenTree::Group(group) => {
                 out.push(TokenTree::Group(Group::new(
                     group.delimiter(),
-                    substitute(group.stream()),
+                    substitute(group.stream(), binding),
                 )));
                 index += 1;
             }
@@ -524,11 +820,87 @@ fn substitute(stream: TokenStream) -> TokenStream {
     out.into_iter().collect()
 }
 
+/// One identifier an invocation passed, and the metavariables it may stand for.
+struct Binding<'a> {
+    names: &'a std::collections::BTreeSet<String>,
+    ident: &'a str,
+}
+
+/// Every identifier in a token stream, however deeply nested.
+fn identifiers(stream: &TokenStream, out: &mut std::collections::BTreeSet<String>) {
+    for tree in stream.clone() {
+        match tree {
+            TokenTree::Ident(ident) => {
+                out.insert(unraw(&ident));
+            }
+            TokenTree::Group(group) => identifiers(&group.stream(), out),
+            _ => {}
+        }
+    }
+}
+
+/// The identifiers passed to each macro `file` invokes.
+///
+/// Invocations only — the `macro_rules!` definitions themselves are skipped,
+/// and so is anything a `#[cfg]` keeps out of an ordinary build, since an
+/// argument passed only under `#[cfg(test)]` binds nothing in the artifact
+/// people link against.
+fn invocation_arguments(file: &syn::File) -> Arguments {
+    let mut walk = InvocationWalk {
+        found: Arguments::new(),
+    };
+    syn::visit::Visit::visit_file(&mut walk, file);
+    walk.found
+}
+
+/// Collects macro invocation arguments, honouring `#[cfg]`.
+struct InvocationWalk {
+    found: Arguments,
+}
+
+impl<'ast> syn::visit::Visit<'ast> for InvocationWalk {
+    fn visit_item(&mut self, item: &'ast syn::Item) {
+        if !ships(attrs_of(item)) {
+            return;
+        }
+        syn::visit::visit_item(self, item);
+    }
+
+    fn visit_impl_item_fn(&mut self, function: &'ast syn::ImplItemFn) {
+        if !ships(&function.attrs) {
+            return;
+        }
+        syn::visit::visit_impl_item_fn(self, function);
+    }
+
+    fn visit_trait_item_fn(&mut self, function: &'ast syn::TraitItemFn) {
+        if !ships(&function.attrs) {
+            return;
+        }
+        syn::visit::visit_trait_item_fn(self, function);
+    }
+
+    // One hook covers every position a macro can be invoked from — item,
+    // expression, type, statement, pattern, impl member. Naming them
+    // individually is how one gets forgotten.
+    fn visit_macro(&mut self, mac: &'ast syn::Macro) {
+        let Some(name) = last_ident(&mac.path) else {
+            return;
+        };
+        if name == "macro_rules" {
+            return;
+        }
+        let entry = self.found.entry(name).or_default();
+        identifiers(&mac.tokens, entry);
+    }
+}
+
 // --- the walk --------------------------------------------------------------
 
 /// Collects every shipped item, descending into bodies and macro definitions.
 struct ItemWalk {
     label: String,
+    arguments: Arguments,
     items: Vec<syn::Item>,
     macro_files: Vec<syn::File>,
     macro_exprs: Vec<syn::Expr>,
@@ -537,12 +909,19 @@ struct ItemWalk {
 impl ItemWalk {
     /// Re-parse a `macro_rules!` definition's expansions.
     ///
+    /// Each rule is re-parsed once with its metavariables replaced by
+    /// placeholders — which is what catches a forbidden name written out in the
+    /// body — and once per identifier any invocation of that macro passes,
+    /// which is what catches a forbidden name the body only refers to through a
+    /// metavariable. See [`substitute`] for why both are needed.
+    ///
     /// # Panics
     ///
-    /// If an expansion parses as neither an item list, an expression, nor a
-    /// block. `syn` treats a macro body as opaque, so the alternative is to
-    /// skip it — and skipping is what let `impl From<$name> for Evidence` hide
-    /// inside `id_newtype!`.
+    /// If an expansion parses in none of the positions a macro may legally
+    /// expand into *and* contains a token that could introduce an item. `syn`
+    /// treats a macro body as opaque, so the alternative is to skip it — and
+    /// skipping is what let `impl From<$name> for Evidence` hide inside
+    /// `id_newtype!`.
     fn expand(&mut self, definition: &syn::ItemMacro) {
         if definition.ident.is_none() || !definition.mac.path.is_ident("macro_rules") {
             return;
@@ -552,37 +931,155 @@ impl ItemWalk {
             .as_ref()
             .map_or_else(|| "<anonymous>".to_owned(), ToString::to_string);
 
-        for expansion in rule_expansions(&definition.mac.tokens) {
-            let tokens = substitute(expansion);
+        let arguments: Vec<String> = self
+            .arguments
+            .get(&name)
+            .map(|idents| idents.iter().cloned().collect())
+            .unwrap_or_default();
 
-            if let Ok(file) = syn::parse2::<syn::File>(tokens.clone()) {
-                self.macro_files.push(file);
-                continue;
-            }
-            if let Ok(expr) = syn::parse2::<syn::Expr>(tokens.clone()) {
-                self.macro_exprs.push(expr);
-                continue;
-            }
-            let braced: TokenStream = TokenTree::Group(Group::new(Delimiter::Brace, tokens)).into();
-            if let Ok(block) = syn::parse2::<syn::Block>(braced) {
-                self.macro_exprs.push(syn::Expr::Block(syn::ExprBlock {
-                    attrs: Vec::new(),
-                    label: None,
-                    block,
-                }));
-                continue;
-            }
+        for rule in rules(&definition.mac.tokens) {
+            let bound: Vec<Binding<'_>> = if mentions_any(&rule.expansion, &rule.names) {
+                arguments
+                    .iter()
+                    .map(|ident| Binding {
+                        names: &rule.names,
+                        ident,
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            };
 
-            panic!(
-                "`{}`: the expansion of `{name}!` could not be re-parsed, so \
-                 anything written inside it is invisible to these guards. A \
-                 macro body is where an `impl` hides from a syntax tree; teach \
-                 `substitute` the shape it uses rather than letting the guard \
-                 pass over it.",
-                self.label
-            );
+            for binding in std::iter::once(None).chain(bound.iter().map(Some)) {
+                let tokens = substitute(rule.expansion.clone(), binding);
+                if self.absorb(&tokens) {
+                    continue;
+                }
+                // The placeholder pass is the one that has to be readable: it
+                // is the shape written in the source. A binding pass can fail
+                // to parse because the argument was never valid in that
+                // position — `conv!(String => Evidence)` substituted into a
+                // pattern, say — and that is an artefact of the
+                // over-approximation, not a hole.
+                if binding.is_some() {
+                    continue;
+                }
+                if !declares_anything(&tokens) {
+                    // A macro that expands to a type, a field list, a match
+                    // arm or a where-clause predicate declares nothing these
+                    // guards ask about, and the triad of file/expression/block
+                    // reaches none of those positions. `pub type Facts =
+                    // list!(EvidenceFacts);` is ordinary stable Rust, and
+                    // panicking on it made two *unrelated* guards explode with
+                    // a message about hidden `impl`s — which is the shape of
+                    // failure that gets a guard deleted rather than fixed.
+                    continue;
+                }
+
+                panic!(
+                    "`{}`: the expansion of `{name}!` could not be re-parsed, so \
+                     anything written inside it is invisible to these guards. A \
+                     macro body is where an `impl` hides from a syntax tree; teach \
+                     `substitute` the shape it uses rather than letting the guard \
+                     pass over it.",
+                    self.label
+                );
+            }
         }
     }
+
+    /// Take an expansion in whichever position it parses, or report failure.
+    fn absorb(&mut self, tokens: &TokenStream) -> bool {
+        if let Ok(file) = syn::parse2::<syn::File>(tokens.clone()) {
+            self.macro_files.push(file);
+            return true;
+        }
+        if let Ok(expr) = syn::parse2::<syn::Expr>(tokens.clone()) {
+            self.macro_exprs.push(expr);
+            return true;
+        }
+        let braced: TokenStream =
+            TokenTree::Group(Group::new(Delimiter::Brace, tokens.clone())).into();
+        if let Ok(block) = syn::parse2::<syn::Block>(braced) {
+            self.macro_exprs.push(syn::Expr::Block(syn::ExprBlock {
+                attrs: Vec::new(),
+                label: None,
+                block,
+            }));
+            return true;
+        }
+        parses_as_a_position_that_declares_nothing(tokens)
+    }
+}
+
+/// Whether a token stream parses in one of the macro-expansion positions that
+/// cannot declare an item.
+///
+/// A macro may legally expand into far more than items, expressions and blocks:
+/// a type, a struct's fields, an enum's variants, a match arm, a where-clause
+/// predicate, a pattern, a bound. None of those can carry an `impl`, a `fn` or
+/// a `struct`, so there is nothing in them for these guards to find — but a
+/// reader that could not parse them at all panicked on legal source, and the
+/// panic surfaced on whichever guard binary happened to read the file. Being
+/// able to *name* the position is what turns "I cannot read this" into "there
+/// is nothing here to read".
+fn parses_as_a_position_that_declares_nothing(tokens: &TokenStream) -> bool {
+    use syn::punctuated::Punctuated;
+
+    syn::parse2::<syn::Type>(tokens.clone()).is_ok()
+        || syn::parse2::<syn::FieldsNamed>(tokens.clone()).is_ok()
+        || syn::parse2::<syn::FieldsUnnamed>(tokens.clone()).is_ok()
+        || syn::parse2::<syn::Visibility>(tokens.clone()).is_ok()
+        || syn::parse::Parser::parse2(
+            |input: ParseStream| {
+                Punctuated::<syn::Field, syn::Token![,]>::parse_terminated_with(
+                    input,
+                    syn::Field::parse_named,
+                )
+            },
+            tokens.clone(),
+        )
+        .is_ok()
+        || syn::parse::Parser::parse2(
+            Punctuated::<syn::Variant, syn::Token![,]>::parse_terminated,
+            tokens.clone(),
+        )
+        .is_ok()
+        || syn::parse::Parser::parse2(
+            Punctuated::<syn::Arm, syn::Token![,]>::parse_terminated,
+            tokens.clone(),
+        )
+        .is_ok()
+        || syn::parse::Parser::parse2(
+            Punctuated::<syn::WherePredicate, syn::Token![,]>::parse_terminated,
+            tokens.clone(),
+        )
+        .is_ok()
+        || syn::parse::Parser::parse2(
+            Punctuated::<syn::TypeParamBound, syn::Token![+]>::parse_terminated,
+            tokens.clone(),
+        )
+        .is_ok()
+        || syn::parse::Parser::parse2(syn::Pat::parse_single, tokens.clone()).is_ok()
+}
+
+/// Whether a token stream contains a keyword that could introduce something a
+/// guard in this directory asks about.
+///
+/// The backstop under [`parses_as_a_position_that_declares_nothing`]. An
+/// expansion this reader can place in no position at all is only a *silence*
+/// worth panicking over if there is something in it to be silent about; these
+/// are the words under which an `impl`, a producer or a construction site can
+/// live.
+fn declares_anything(stream: &TokenStream) -> bool {
+    stream.clone().into_iter().any(|tree| match tree {
+        TokenTree::Ident(ident) => matches!(
+            unraw(&ident).as_str(),
+            "impl" | "fn" | "struct" | "enum" | "union" | "trait" | "macro_rules"
+        ),
+        TokenTree::Group(group) => declares_anything(&group.stream()),
+        _ => false,
+    })
 }
 
 impl<'ast> syn::visit::Visit<'ast> for ItemWalk {
@@ -637,6 +1134,78 @@ pub fn base_ident(ty: &syn::Type) -> Option<String> {
         }
         _ => None,
     }
+}
+
+/// Every base identifier a value of this type could be.
+///
+/// [`base_ident`] answers "what is this type", which has one answer only while
+/// the type has one component. `-> (Evidence, u8)` produces an `Evidence` and a
+/// `u8`, and a rule that read the pair as a single unnamed thing saw neither:
+/// `base_ident` returns `None` for a tuple, so the function looked like it
+/// returned nothing at all. Pairing the forbidden value with a throwaway is a
+/// one-character bypass of a rule that keys on the return type.
+fn base_idents(ty: &syn::Type, out: &mut Vec<String>) {
+    match ty {
+        syn::Type::Reference(inner) => base_idents(&inner.elem, out),
+        syn::Type::Paren(inner) => base_idents(&inner.elem, out),
+        syn::Type::Group(inner) => base_idents(&inner.elem, out),
+        syn::Type::Tuple(tuple) => {
+            for element in &tuple.elems {
+                base_idents(element, out);
+            }
+        }
+        syn::Type::Path(_) => out.extend(base_ident(ty)),
+        _ => {}
+    }
+}
+
+/// The type aliases declared by `items`, `type Ev = Evidence;` by name.
+///
+/// Every rule in this directory keys on a *written* name, and an alias is a
+/// second written name for the same type: `type Ev = Evidence;` turns
+/// `fn launder(run: &CheckRun) -> Ev` into a producer of `Evidence` that no
+/// rule about `Evidence` can see. Rust resolves the alias and the guard did
+/// not, which is the whole gap.
+///
+/// Same-file only, and that is a deliberate stopping point rather than an
+/// oversight — see [`resolve_alias`].
+fn type_aliases(items: &[syn::Item]) -> std::collections::BTreeMap<String, String> {
+    let mut out = std::collections::BTreeMap::new();
+    for item in items {
+        let syn::Item::Type(alias) = item else {
+            continue;
+        };
+        if let Some(target) = base_ident(&alias.ty) {
+            out.insert(alias.ident.to_string(), target);
+        }
+    }
+    out
+}
+
+/// Follow an alias chain to the name it finally stands for.
+///
+/// `type A = B; type B = Evidence;` resolves `A` to `Evidence`. The step limit
+/// is there because `type A = B; type B = A;` does not compile but this reader
+/// is not a compiler, and a guard that hangs is a guard that gets killed.
+///
+/// # What this deliberately does not resolve
+///
+/// An alias visible only through a `use` from another file, an associated type
+/// (`Self::Output`), and a generic parameter bound to the forbidden type
+/// elsewhere. Each needs name resolution across crates or trait resolution —
+/// which is to say, a type checker — and half a type checker inside a guard is
+/// a thing that is wrong in ways nobody can predict. The same-file case is the
+/// one a person actually reaches for, because an alias is written where it is
+/// used; the rest is recorded here as known, not as handled.
+fn resolve_alias(name: &str, aliases: &std::collections::BTreeMap<String, String>) -> String {
+    let mut current = name.to_owned();
+    for _ in 0..16 {
+        match aliases.get(&current) {
+            Some(next) if *next != current => current = next.clone(),
+            _ => break,
+        }
+    }
+    current
 }
 
 /// The first type among a path segment's angle-bracketed arguments.
@@ -719,8 +1288,13 @@ fn visibility_of(vis: &syn::Visibility) -> Vis {
 
 /// Every function and method in `items`: free, inherent, trait impl, and trait
 /// declaration.
+///
+/// Return types are resolved through any type alias `items` declares, so
+/// `type Ev = Evidence; fn launder(run: &CheckRun) -> Ev` is read as the
+/// producer of an `Evidence` that it is.
 #[must_use]
 pub fn functions(items: &[syn::Item]) -> Vec<Function> {
+    let aliases = type_aliases(items);
     let mut out = Vec::new();
 
     for item in items {
@@ -731,6 +1305,7 @@ pub fn functions(items: &[syn::Item]) -> Vec<Function> {
                     visibility_of(&function.vis),
                     None,
                     None,
+                    &aliases,
                 ));
             }
             syn::Item::Impl(block) => {
@@ -748,6 +1323,7 @@ pub fn functions(items: &[syn::Item]) -> Vec<Function> {
                         visibility_of(&function.vis),
                         owner.clone(),
                         owner_trait.clone(),
+                        &aliases,
                     ));
                 }
             }
@@ -765,6 +1341,7 @@ pub fn functions(items: &[syn::Item]) -> Vec<Function> {
                         Vis::Inherited,
                         None,
                         Some(name.clone()),
+                        &aliases,
                     ));
                 }
             }
@@ -781,6 +1358,7 @@ fn described(
     visibility: Vis,
     owner: Option<String>,
     owner_trait: Option<String>,
+    aliases: &std::collections::BTreeMap<String, String>,
 ) -> Function {
     let receiver = match sig.inputs.first() {
         Some(syn::FnArg::Receiver(receiver)) => {
@@ -812,16 +1390,21 @@ fn described(
         })
         .collect();
 
-    let returns = match &sig.output {
-        syn::ReturnType::Type(_, ty) => base_ident(ty).map(|name| {
-            if name == "Self" {
+    let mut produced = Vec::new();
+    if let syn::ReturnType::Type(_, ty) = &sig.output {
+        base_idents(ty, &mut produced);
+    }
+    let produces: Vec<String> = produced
+        .into_iter()
+        .map(|name| {
+            let resolved = if name == "Self" {
                 owner.clone().unwrap_or(name)
             } else {
                 name
-            }
-        }),
-        syn::ReturnType::Default => None,
-    };
+            };
+            resolve_alias(&resolved, aliases)
+        })
+        .collect();
 
     Function {
         name: sig.ident.to_string(),
@@ -830,7 +1413,8 @@ fn described(
         visibility,
         receiver,
         mutably_borrows,
-        returns,
+        returns: produces.first().cloned(),
+        produces,
     }
 }
 
@@ -915,8 +1499,14 @@ pub fn struct_fields(items: &[syn::Item], name: &str) -> Vec<(String, Vis)> {
 
 /// Every `From`, `TryFrom` and `Into` impl in `items`, normalized so that
 /// `source` is always the type converted from.
+///
+/// Both ends are resolved through any type alias `items` declares:
+/// `type Ev = Evidence; impl From<CheckRun> for Ev` is the forbidden
+/// conversion under a second name, and the compiler agrees even though a rule
+/// matching the written word `Evidence` does not.
 #[must_use]
 pub fn conversions(items: &[syn::Item]) -> Vec<Conversion> {
+    let aliases = type_aliases(items);
     let mut out = Vec::new();
 
     for item in items {
@@ -958,8 +1548,8 @@ pub fn conversions(items: &[syn::Item]) -> Vec<Conversion> {
         };
         out.push(Conversion {
             via,
-            source,
-            target,
+            source: resolve_alias(&source, &aliases),
+            target: resolve_alias(&target, &aliases),
         });
     }
 

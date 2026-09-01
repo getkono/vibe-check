@@ -201,18 +201,29 @@ fn nothing_but_the_sanctioned_constructor_produces_one() {
     // — which is a laundering with an extra `Ok` around it. Nothing in the
     // workspace returns `Result<Evidence, _>`, so unwrapping costs nothing;
     // `download` is sanctioned by name and trait instead.
+    //
+    // A tuple return is read element by element and a same-file `type` alias is
+    // followed to the name it stands for, because both are ways of returning
+    // the value while writing a different word:
+    //
+    //     type Ev = Evidence;
+    //     fn launder(run: &CheckRun) -> Ev
+    //     fn launder(run: &CheckRun) -> (Evidence, u8)
+    //
+    // Neither is exotic. The first is what someone writes to shorten a
+    // signature; the second is what someone writes to return a diagnostic
+    // alongside the value.
     let mut offenders = Vec::new();
 
     for (path, file) in common::workspace_sources() {
         for function in common::functions(file.items()) {
-            let Some(produced) = function.returns.as_deref() else {
-                continue;
-            };
-            if !FORBIDDEN_TARGETS.contains(&produced) {
-                continue;
-            }
-            if !is_sanctioned(&function, produced) {
-                offenders.push(format!("{path}: fn {} -> {produced}", function.path()));
+            for produced in &function.produces {
+                if !FORBIDDEN_TARGETS.contains(&produced.as_str()) {
+                    continue;
+                }
+                if !is_sanctioned(&function, produced) {
+                    offenders.push(format!("{path}: fn {} -> {produced}", function.path()));
+                }
             }
         }
     }
