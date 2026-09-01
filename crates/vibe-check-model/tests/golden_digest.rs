@@ -46,13 +46,20 @@ use vibe_check_model::{
 const GOLDEN: &str = include_str!("golden/bundle.json");
 
 /// The digest of the verdict-bearing subtree of [`GOLDEN`].
+///
+/// Both constants moved once, deliberately, when this branch merged #31. The
+/// golden's escalation named its requirement `r_9f3c1a`, and `RequirementId`
+/// now refuses anything that is not `req_<name>_<32 hex>` — so the old value
+/// could not be deserialized at all, the fixture had to change, and the
+/// digests followed it. That is the intended-change case the module docs
+/// describe, not canonicalization drift.
 const GOLDEN_VERDICT_DIGEST: &str =
-    "blake3:dc4661870d025987dbd4835f50e941a4d24fa08e6f433acce81ca7bff18942d0";
+    "blake3:503609e33409024b863e2b4c4c33f2bbbaed35086176f3fe98f8bfabe14d7bed";
 
 /// The content address of the whole of [`GOLDEN`], minus the paths on
 /// [`BUNDLE_ID_EXCLUDED_PATHS`].
 const GOLDEN_BUNDLE_ID: &str =
-    "blake3:b83dc1429ef82e5517d8975c5ea8c7caeee023550970894221500d33896388fe";
+    "blake3:67c1772a0f87ad6b1268300140d037aef5132ced916800fc8af646276fbb7310";
 
 fn golden() -> EvidenceBundle {
     serde_json::from_str(GOLDEN).expect(

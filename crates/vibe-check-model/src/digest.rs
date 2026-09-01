@@ -938,7 +938,10 @@ mod tests {
             Tier::T1,
             ReasonCode::CapabilityUnverified,
             "the test binary would not compile",
-            EvidenceRef::Requirement(RequirementId::new("r_9f3c1a")),
+            EvidenceRef::Requirement(
+                RequirementId::from_wire("req_tests-pass_9f3c1a77b0e4d2f8a6c5931e7b4d0a28")
+                    .expect("a well-formed fixture identifier"),
+            ),
         );
         adjudicators.route(Enforcement::Enforcing).escalate(
             Tier::T1,

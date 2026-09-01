@@ -792,3 +792,94 @@ fn a_cfg_this_reader_cannot_classify_is_a_loud_failure() {
     // the reader stops instead — and this is what proves it actually does.
     let _ = common::read("sample", "#[cfg(1 + 1)]\nmod helpers {}\n");
 }
+
+#[test]
+fn a_cfg_with_a_trailing_comma_is_read_rather_than_refused() {
+    // `#[cfg(test,)]` compiles, and is configured out of an ordinary build
+    // exactly like `#[cfg(test)]` — an attribute's argument list takes a
+    // trailing comma the way every other list in the language does. The reader
+    // consumed one predicate and left the comma behind, and the leftover made
+    // `syn::parse2` fail, which turned a legal spelling into the loud panic
+    // above.
+    //
+    // The nested `all(test,)` was already accepted, because an inner list is
+    // read with `parse_terminated`. That asymmetry is what makes this a bug
+    // rather than a rule: nobody could have derived which of the two forms was
+    // allowed, and the failure blames the wrong thing when they guess wrong.
+    let sample = common::read(
+        "sample",
+        r"
+        #[cfg(test,)]
+        mod fixture {}
+        #[cfg(all(test,))]
+        mod also_fixture {}
+        #[cfg(not(test),)]
+        mod ships {}
+        ",
+    );
+
+    assert_eq!(
+        common::module_declarations(sample.items()),
+        ["ships"],
+        "the trailing comma changes nothing about which build an item is in"
+    );
+}
+
+#[test]
+fn a_raw_identifier_predicate_is_the_predicate_it_spells() {
+    // `#[cfg(r#test)]` is `#[cfg(test)]`: rustc compares the symbol, and the
+    // `r#` is lexical syntax rather than part of the name. `Ident::to_string`
+    // keeps the prefix, so the comparison against `"test"` failed and a
+    // test-only item read as shipping.
+    //
+    // That direction over-reports rather than under-reports, so nothing was
+    // hidden by it — but the guard's safety was resting on a spelling accident,
+    // and the next person to compare an identifier the same way gets no warning
+    // that they are on the other side of it.
+    let sample = common::read(
+        "sample",
+        r"
+        #[cfg(r#test)]
+        mod fixture {}
+        #[cfg(not(r#test))]
+        mod ships {}
+        ",
+    );
+
+    assert_eq!(
+        common::module_declarations(sample.items()),
+        ["ships"],
+        "a raw identifier names the same predicate as the bare one"
+    );
+}
+
+#[test]
+fn an_unevaluable_predicate_survives_a_negation() {
+    // The lattice fix, asserted on this guard's own reader as well as on the
+    // conversion guard's. `Cfg::Other` used to be stored as the two-valued
+    // `true`, so `not(…)` inverted it and an item behind
+    // `#[cfg(not(feature = …))]` — the ordinary way to write a default — read
+    // as configured out. Every rule in this file is over the items that ship,
+    // so an item that vanishes from the walk vanishes from the rule.
+    let sample = common::read(
+        "sample",
+        r#"
+        #[cfg(not(feature = "e2e"))]
+        mod ships {}
+        #[cfg(all(not(feature = "e2e"), not(test)))]
+        mod also_ships {}
+        #[cfg(any(feature = "e2e", test))]
+        mod ships_too {}
+        #[cfg(all(feature = "e2e", test))]
+        mod does_not {}
+        "#,
+    );
+
+    assert_eq!(
+        common::module_declarations(sample.items()),
+        ["ships", "also_ships", "ships_too"],
+        "unknown propagates through `not`, `all` and `any` instead of \
+         collapsing into a value a negation can flip — and `all(…, test)` is \
+         still decidedly false"
+    );
+}

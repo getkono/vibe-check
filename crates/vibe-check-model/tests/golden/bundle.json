@@ -59,7 +59,7 @@
         "detail": "the test binary would not compile for `kono-core`",
         "evidence": {
           "kind": "requirement",
-          "ref": "r_9f3c1a"
+          "ref": "req_tests-pass_9f3c1a77b0e4d2f8a6c5931e7b4d0a28"
         }
       },
       {

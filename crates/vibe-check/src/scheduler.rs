@@ -16,7 +16,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use tokio::task::JoinSet;
 use vibe_check_host::exec::Exec;
-use vibe_check_host::scheduler::{Dispatch, Leaf, Scheduler};
+use vibe_check_host::scheduler::{Dispatch, Leaf, Leaves, Scheduler};
 use vibe_check_model::LeafId;
 
 /// Runs leaves on this machine.
@@ -48,7 +48,7 @@ impl LocalScheduler {
 
 #[async_trait]
 impl Scheduler for LocalScheduler {
-    async fn dispatch(&self, leaves: Vec<Leaf>) -> Dispatch {
+    async fn dispatch(&self, leaves: Leaves) -> Dispatch {
         let mut set = JoinSet::new();
         let mut queue = leaves.into_iter();
         let mut completed = Vec::new();
@@ -170,10 +170,24 @@ mod tests {
     fn leaf(id: &str, program: &str) -> Leaf {
         Leaf {
             id: LeafId::new_checked(id).expect("a well-formed fixture leaf id"),
-            requirement: RequirementId::new(format!("req_{id}")),
+            requirement: RequirementId::from_wire(format!(
+                "req_{id}_00000000000000000000000000000000"
+            ))
+            .expect("a well-formed fixture identifier"),
             plan: ProcessPlan::new(program, []),
             lane: LaneId::new("cheap"),
         }
+    }
+
+    /// A batch, for the fixtures below, whose ids are distinct by construction.
+    ///
+    /// `dispatch` takes `Leaves` rather than a `Vec<Leaf>`, so every fixture
+    /// here goes through the uniqueness check. That the check rejects a
+    /// repetition is asserted where it lives, in
+    /// `vibe_check_host::scheduler`; what matters here is that there is no
+    /// second route past it into the one implementation.
+    fn batch(leaves: Vec<Leaf>) -> Leaves {
+        Leaves::new(leaves).expect("fixture leaf ids are distinct")
     }
 
     /// Leaf identifiers as plain strings, for assertions.
@@ -190,11 +204,11 @@ mod tests {
         let exec = Arc::new(FakeExec::new().with_success("cargo", Vec::new()));
         let scheduler = LocalScheduler::new(Arc::clone(&exec) as Arc<dyn Exec>);
         let dispatch = scheduler
-            .dispatch(vec![
+            .dispatch(batch(vec![
                 leaf("a", "cargo"),
                 leaf("b", "cargo"),
                 leaf("c", "cargo"),
-            ])
+            ]))
             .await;
         let Dispatch::Completed { leaf_ids, panicked } = dispatch else {
             panic!("local scheduling completes in place");
@@ -209,11 +223,11 @@ mod tests {
         let exec = Arc::new(FakeExec::new().with_success("cargo", Vec::new()));
         let scheduler = LocalScheduler::new(Arc::clone(&exec) as Arc<dyn Exec>);
         let dispatch = scheduler
-            .dispatch(vec![
+            .dispatch(batch(vec![
                 leaf("z", "cargo"),
                 leaf("m", "cargo"),
                 leaf("a", "cargo"),
-            ])
+            ]))
             .await;
         let Dispatch::Completed { leaf_ids, panicked } = dispatch else {
             panic!("local scheduling completes in place");
@@ -232,11 +246,11 @@ mod tests {
         let exec = Arc::new(FakeExec::new().with_success("cargo", Vec::new()));
         let scheduler = LocalScheduler::new(Arc::clone(&exec) as Arc<dyn Exec>);
         let dispatch = scheduler
-            .dispatch(vec![
+            .dispatch(batch(vec![
                 leaf("good", "cargo"),
                 leaf("missing", "miri"),
                 leaf("also-good", "cargo"),
-            ])
+            ]))
             .await;
         let Dispatch::Completed { leaf_ids, panicked } = dispatch else {
             panic!("local scheduling completes in place");
@@ -250,7 +264,7 @@ mod tests {
         let exec = Arc::new(FakeExec::new().with_success("cargo", Vec::new()));
         let scheduler = LocalScheduler::new(Arc::clone(&exec) as Arc<dyn Exec>).with_concurrency(1);
         let leaves: Vec<_> = (0..5).map(|i| leaf(&format!("l{i}"), "cargo")).collect();
-        let dispatch = scheduler.dispatch(leaves).await;
+        let dispatch = scheduler.dispatch(batch(leaves)).await;
         let Dispatch::Completed { leaf_ids, panicked } = dispatch else {
             panic!("local scheduling completes in place");
         };
@@ -263,7 +277,7 @@ mod tests {
         // A zero limit would take zero leaves from the queue and hang forever.
         let exec = Arc::new(FakeExec::new().with_success("cargo", Vec::new()));
         let scheduler = LocalScheduler::new(Arc::clone(&exec) as Arc<dyn Exec>).with_concurrency(0);
-        let dispatch = scheduler.dispatch(vec![leaf("only", "cargo")]).await;
+        let dispatch = scheduler.dispatch(batch(vec![leaf("only", "cargo")])).await;
         let Dispatch::Completed { leaf_ids, panicked } = dispatch else {
             panic!("local scheduling completes in place");
         };
@@ -279,11 +293,11 @@ mod tests {
         let exec = Arc::new(PanickingExec { on: "boom" });
         let scheduler = LocalScheduler::new(exec as Arc<dyn Exec>);
         let dispatch = scheduler
-            .dispatch(vec![
+            .dispatch(batch(vec![
                 leaf("good", "cargo"),
                 leaf("bad", "boom"),
                 leaf("also-good", "cargo"),
-            ])
+            ]))
             .await;
         let Dispatch::Completed { leaf_ids, panicked } = dispatch else {
             panic!("local scheduling completes in place");
@@ -308,7 +322,7 @@ mod tests {
             leaf("c", "cargo"),
             leaf("d", "boom"),
         ];
-        let dispatch = scheduler.dispatch(leaves).await;
+        let dispatch = scheduler.dispatch(batch(leaves)).await;
         let Dispatch::Completed { leaf_ids, panicked } = dispatch else {
             panic!("local scheduling completes in place");
         };

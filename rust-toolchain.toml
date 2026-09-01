@@ -3,8 +3,9 @@
 # and what Miri reports. Recording an exact version is what lets a bundle be
 # replayed and lets a mismatch be *explained* rather than mysterious.
 #
-# This file is also a gate path: a pull request that edits it is adjudicated
-# against the merge-base policy, with the verdict forced to human review.
+# This file is also a gate path — or will be. #46 enumerates it among the
+# shipped gate paths and adjudicates a pull request that edits it against the
+# merge-base policy, forcing the verdict to human review. Nothing does that yet.
 [toolchain]
 channel = "1.97.1"
 components = ["rustfmt", "clippy", "rust-analyzer"]
