@@ -9,12 +9,16 @@
 use std::ffi::{OsStr, OsString};
 
 use clap::Parser;
+use color_eyre::config::HookBuilder;
 use eyre::Result;
 use vibe_check::{Cli, panic};
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    color_eyre::install()?;
+    // Split rather than `color_eyre::install()`, for the reason given in
+    // `main.rs`: the panic half must be rendered through a fallible write.
+    let (panic_hook, eyre_hook) = HookBuilder::default().try_into_hooks()?;
+    eyre_hook.install()?;
     tracing_subscriber::fmt()
         .with_writer(std::io::stderr)
         .with_env_filter(
@@ -22,8 +26,8 @@ async fn main() -> Result<()> {
                 .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn")),
         )
         .init();
-    // After `color_eyre::install`, for the reason given in `main.rs`.
-    panic::install();
+    // The only panic hook this process installs.
+    panic::install(panic_hook);
 
     // `args_os`, never `args`. The `String` iterator panics on a non-UTF-8
     // argument, and it is evaluated here — outside the guard — so that panic

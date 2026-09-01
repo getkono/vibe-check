@@ -135,19 +135,35 @@ static FIRST_PANIC: OnceLock<String> = OnceLock::new();
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Panicked;
 
-/// Install the panic hook that records where a panic happened.
+/// Install the process panic hook: record where the panic happened, then print
+/// `color_eyre`'s crash report.
 ///
-/// Must run **after** `color_eyre::install()`, whose own hook prints the
-/// backtrace a crash report is worth having.
+/// This is the **only** hook the binaries install. It is handed the
+/// [`PanicHook`] half of
+/// [`HookBuilder::try_into_hooks`](color_eyre::config::HookBuilder::try_into_hooks)
+/// — the binaries install the [`EyreHook`](color_eyre::config::EyreHook) half
+/// themselves and never call `color_eyre::install`, which would set a hook of
+/// its own that this one would then have to wrap.
 ///
-/// This one *wraps* that hook rather than replacing it. Recording alone would
-/// buy a bundle at the cost of the report that says which line of which crate
-/// came apart, and a verdict nobody can act on is only half the job. The
-/// previous hook keeps printing, to stderr, so stdout stays exactly one JSON
-/// document; this hook only adds a note of the first panic for the bundle to
-/// carry.
-pub fn install() {
-    let previous = std::panic::take_hook();
+/// # Why render the report here rather than delegate to `color_eyre`
+///
+/// The report is identical either way; what differs is what happens when the
+/// write fails. `PanicHook::into_panic_hook` — the closure `color_eyre::install`
+/// installs — is a single `eprintln!`, and `eprintln!` *panics* when stderr
+/// cannot be written. A panic raised inside a panic hook is not catchable: the
+/// runtime prints `thread panicked while processing panic. aborting.` and calls
+/// `abort_internal`, so the process dies on `SIGABRT` and the shell reports
+/// `134` — a number no exit table describes, from the one code path whose whole
+/// purpose is to make a crash legible.
+///
+/// Calling [`PanicHook::panic_report`] and writing it through an ignored
+/// `writeln!` keeps the report byte-for-byte and makes the write fallible
+/// instead of fatal. A full disk then costs the crash report and nothing else:
+/// the bundle is still written, and the exit code is still
+/// [`exit::FAILURE`].
+///
+/// Stderr and not stdout, so stdout stays exactly one JSON document.
+pub fn install(hook: color_eyre::config::PanicHook) {
     std::panic::set_hook(Box::new(move |info| {
         let location = info.location().map_or_else(
             || "an unknown location".to_owned(),
@@ -157,7 +173,8 @@ pub fn install() {
             .payload_as_str()
             .unwrap_or("a panic with a non-string payload");
         let _ = FIRST_PANIC.set(format!("{payload} at {location}"));
-        previous(info);
+        // Fallible-and-ignored, and that is the entire point — see above.
+        let _ = writeln!(std::io::stderr(), "{}", hook.panic_report(info));
     }));
 }
 
@@ -170,19 +187,28 @@ pub fn install() {
 ///
 /// # What this cannot cover
 ///
-/// **Anything before the call.** Argument parsing happens in the binaries, and
-/// clap exits `2` itself on a bad command line. That is why both shims read
+/// **Anything before the call.** Four things run in each binary's `main`
+/// before this function is entered, and a panic in any of them escapes as
+/// `101` with no bundle: building `color_eyre`'s hooks and installing the eyre
+/// half, initialising `tracing_subscriber`, [`install`] itself, and argument
+/// parsing. The first three are straight-line setup with no input, so the one
+/// that has ever actually fired is the last — which is why both shims read
 /// `args_os` rather than `args`: the `String` iterator *panics* on a non-UTF-8
-/// argument, and a panic raised before this function is entered escapes as
-/// `101` with no bundle.
+/// argument, where clap merely exits `2`. That `2` is the exit table's, and is
+/// the one code the binaries do not choose.
 ///
-/// **A process killed by a signal.** If stderr cannot be written — a full disk,
-/// a closed log — the panic hook's own report fails, and a panic while
-/// panicking aborts. `SIGABRT` is not an exit code and is outside every exit
-/// table; no `u8` returned from here can describe it. The writes *this* module
-/// performs are all fallible-and-ignored for that reason, so they contribute
-/// nothing to the risk, but the hook that prints the crash report is
-/// `color_eyre`'s and is not ours to make infallible.
+/// Note the ordering this implies: [`install`] is the last of the three setup
+/// steps, so a panic in the first two is reported by whatever hook is current
+/// — Rust's default — rather than by ours. Neither writes to stdout, so the
+/// "exactly one JSON document" property holds regardless.
+///
+/// **A process killed by a signal.** `SIGKILL`, a segmentation fault, a stack
+/// overflow: a signal is not an exit code, no `u8` returned from here can
+/// describe one, and nothing in this crate can prevent it. What is *not* on
+/// this list any more is a full disk. Every write on the panic path —
+/// [`install`]'s crash report included — is fallible-and-ignored, so a failed
+/// write costs the diagnostic it was carrying and does not turn a reported
+/// panic into an abort.
 pub async fn run_guarded(cli: Cli) -> u8 {
     match caught(crate::run(cli)).await {
         Ok(Ok(code)) => code,

@@ -268,6 +268,56 @@ fn a_non_utf8_argument_is_rejected_rather_than_crashing() {
 }
 
 #[test]
+#[cfg(unix)]
+fn a_panic_that_cannot_write_its_report_still_exits_one() {
+    // The regression this guards is worth spelling out, because it is invisible
+    // from every other test here: `color_eyre`'s own panic hook is a single
+    // `eprintln!`, and `eprintln!` panics when the write fails. A panic raised
+    // *inside* a panic hook is not catchable — the runtime prints "thread
+    // panicked while processing panic. aborting." and calls `abort_internal`,
+    // so `catch_unwind` never sees it, no bundle is written, and the shell
+    // reports 134. That is a code the table in `exit.rs` has never described,
+    // arriving from the one path whose entire job is to be legible.
+    //
+    // `/dev/full` is the cheapest honest full disk: every write returns ENOSPC.
+    // Redirecting stderr to it is exactly a crash on a machine that has run out
+    // of room for logs, which is when a crash is most likely in the first place.
+    for (name, binary) in [
+        ("vibe-check", Binary::Direct),
+        ("cargo-vibe-check", Binary::CargoShim),
+    ] {
+        let Ok(full) = std::fs::OpenOptions::new().write(true).open("/dev/full") else {
+            // Not every unix has it (containers with a minimal /dev, some BSDs).
+            // Skipping is right: the alternative is a gate that fails for a
+            // reason that has nothing to do with the code under test.
+            eprintln!("skipping: /dev/full is not available");
+            return;
+        };
+
+        let mut command = binary.command();
+        command.arg("classify");
+        command.env(PANIC_HATCH, "1");
+        command.stdout(std::process::Stdio::null());
+        command.stderr(std::process::Stdio::from(full));
+
+        let status = command.status().expect("the binary under test runs");
+        assert_ne!(
+            status.code(),
+            None,
+            "{name}: the process was killed by a signal rather than exiting; a \
+             signal is outside every exit table, and an unwritable stderr must \
+             not cause one"
+        );
+        assert_eq!(
+            status.code(),
+            Some(1),
+            "{name}: losing the crash report costs the diagnostic, not the \
+             exit code"
+        );
+    }
+}
+
+#[test]
 fn the_bundle_carries_no_digest_it_did_not_compute() {
     // `bundle_id` and `verdict_digest` are digests, and a crash computed
     // neither. They must be absent in a way a consumer can *see* is absent:

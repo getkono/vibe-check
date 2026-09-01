@@ -31,6 +31,20 @@
 //! reported as `1` with a minimal bundle whose single escalation is
 //! `internal-panic` at `T2`.
 //!
+//! Precisely: a panic anywhere inside [`crate::run`], which is everything a
+//! command actually does. The setup each binary performs first — building the
+//! `color_eyre` hooks, initialising tracing, installing the panic hook, then
+//! parsing arguments — runs outside the guard, and a panic there still exits
+//! `101`. [`crate::panic::run_guarded`] enumerates that boundary. A consumer
+//! branching on this table should read `101` the way it would read a signal:
+//! vibe-check came apart before it started, and told you nothing.
+//!
+//! A *failed write* is not on that list. Every write the crash path performs —
+//! the `color_eyre` crash report included — is fallible-and-ignored, so a full
+//! disk or a closed log costs the diagnostic and nothing more. It does not
+//! abort the process, which the shell would report as `134`, and which this
+//! table does not describe either.
+//!
 //! Those two numbers are not in conflict, because they answer different
 //! questions. **The exit code says whether vibe-check worked**; a crash did
 //! not, so it is `1` and never `20`, or the pipeline cannot tell an outage from

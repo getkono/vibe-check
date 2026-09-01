@@ -21,8 +21,10 @@
 //! minimal bundle, so no panic *inside* [`run`] reaches a process exit code the
 //! contract in [`exit`] does not describe. Two things sit outside that
 //! guarantee and are documented on `run_guarded` rather than papered over here:
-//! argument parsing, which happens before the guard and is clap's `2`; and a
-//! process killed by a signal, which is not an exit code at all.
+//! everything each binary does before entering the guard — installing the
+//! `color_eyre` and panic hooks, initialising tracing, and parsing arguments,
+//! the last of which is clap's `2`; and a process killed by a signal, which is
+//! not an exit code at all.
 
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
 
