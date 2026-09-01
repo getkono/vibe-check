@@ -120,6 +120,30 @@ fn the_pinned_values_are_what_the_documented_encoding_produces() {
     );
 }
 
+/// The digest orders members by their bytes, not by camino's `Ord`.
+///
+/// `Utf8PathBuf` compares component-wise, so `f/a` sorts *before* `f-` in the
+/// `BTreeSet` the scope holds — `f` against `f-`, then `a` against nothing. That
+/// order is deterministic and it belongs to camino. If the digest read it, a
+/// camino release that refined path comparison would move every identifier in
+/// every historical bundle, with a green build and no diff to point at. So
+/// `canonical_bytes` re-sorts by bytes, and this test is the pair of paths that
+/// tells the two rules apart.
+#[test]
+fn the_digest_does_not_inherit_camino_s_path_ordering() {
+    assert_eq!(
+        derive("tests-pass", &[], &["f-", "f/a"]),
+        format!(
+            "req_tests-pass_{}",
+            blake3::hash(b"tests-pass\x1e\x1ef-\x1ff/a")
+                .to_hex()
+                .as_str()[..16]
+                .to_owned()
+        ),
+        "byte order puts `f-` first; camino's component-wise order puts `f/a` first"
+    );
+}
+
 /// The form is what the issue specified and what `from_wire` accepts.
 #[test]
 fn a_derived_id_has_the_documented_form() {

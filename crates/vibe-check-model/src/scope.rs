@@ -204,7 +204,11 @@ impl RequirementScope {
         self.crates.iter()
     }
 
-    /// The paths in this scope, ascending.
+    /// The paths in this scope, ascending in `Utf8Path` order.
+    ///
+    /// Which is *not* the order [`canonical_bytes`](Self::canonical_bytes)
+    /// encodes them in, and deliberately so — see that method. Nothing that
+    /// feeds a digest may read this.
     pub fn paths(&self) -> impl ExactSizeIterator<Item = &Utf8Path> {
         self.paths.iter().map(Utf8PathBuf::as_path)
     }
@@ -223,6 +227,18 @@ impl RequirementScope {
     /// the output is always the set boundary and every `\u{1f}` is always a
     /// member boundary — so the encoding can be read back and is therefore
     /// injective.
+    ///
+    /// # Why the members are re-sorted here
+    ///
+    /// By their UTF-8 bytes, not by the order they sit in the sets. For
+    /// [`CrateId`] the two agree, but `Utf8PathBuf`'s [`Ord`] is *component-wise*
+    /// — `f/a` sorts before `f-`, because it compares `f` against `f-` and only
+    /// then `a` against nothing. That order is perfectly deterministic, and it
+    /// belongs to camino rather than to us. A camino release that refined it
+    /// would move every derived identifier in the workspace, silently and with
+    /// a green build, and every historical escalation reference with it. So the
+    /// digest reads a rule this file states, and the collections keep whichever
+    /// order suits them.
     ///
     /// `pub(crate)` on purpose. This is an input to a digest, not a
     /// serialization format: publishing it would invite a second consumer, and
@@ -266,9 +282,16 @@ impl fmt::Display for RequirementScope {
     }
 }
 
-/// Append `members` to `out`, separated by [`UNIT_SEPARATOR`].
+/// Append `members` to `out`, sorted by their bytes and separated by
+/// [`UNIT_SEPARATOR`].
+///
+/// The sort is here rather than inherited from the caller's collection so that
+/// the digest input depends on a rule this file states — see
+/// [`RequirementScope::canonical_bytes`].
 fn join_into<'a>(out: &mut Vec<u8>, members: impl Iterator<Item = &'a str>) {
-    for (index, member) in members.enumerate() {
+    let mut members: Vec<&str> = members.collect();
+    members.sort_unstable_by_key(|member| member.as_bytes());
+    for (index, member) in members.into_iter().enumerate() {
         if index > 0 {
             out.push(UNIT_SEPARATOR);
         }
@@ -486,11 +509,16 @@ mod tests {
                         .collect()
                 }
             };
-            prop_assert_eq!(
-                split(crate_part),
-                crates.iter().cloned().collect::<Vec<_>>()
-            );
-            prop_assert_eq!(split(path_part), paths.into_iter().collect::<Vec<_>>());
+            // Byte order, which is what `canonical_bytes` imposes — and for
+            // paths that is deliberately *not* the `BTreeSet<Utf8PathBuf>`
+            // order, so this expectation is built from the raw strings.
+            let mut expected_crates: Vec<String> = crates.into_iter().collect();
+            expected_crates.sort_unstable();
+            let mut expected_paths: Vec<String> = paths.into_iter().collect();
+            expected_paths.sort_unstable();
+
+            prop_assert_eq!(split(crate_part), expected_crates);
+            prop_assert_eq!(split(path_part), expected_paths);
         }
     }
 }
