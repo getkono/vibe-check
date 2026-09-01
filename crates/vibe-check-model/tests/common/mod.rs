@@ -722,6 +722,11 @@ fn collect_rs(dir: &Utf8Path, out: &mut Vec<Utf8PathBuf>) {
 struct Rule {
     /// The token group that follows the `=>`.
     expansion: TokenStream,
+    /// The internal-rule marker this rule matches, or the empty string.
+    ///
+    /// See [`internal_rule_marker`]. This is what keeps one rule's arguments
+    /// out of another's.
+    marker: String,
     /// The metavariables this rule matches that could stand for a *type name*:
     /// the ones declared `:ty`, `:ident` or `:path`.
     ///
@@ -752,17 +757,66 @@ fn rules(body: &TokenStream) -> Vec<Rule> {
         let Some(TokenTree::Group(expansion)) = trees.get(index + 2) else {
             continue;
         };
-        let names = match index.checked_sub(1).and_then(|before| trees.get(before)) {
-            Some(TokenTree::Group(matcher)) => naming_metavariables(&matcher.stream()),
-            _ => std::collections::BTreeSet::new(),
+        let matcher = match index.checked_sub(1).and_then(|before| trees.get(before)) {
+            Some(TokenTree::Group(matcher)) => Some(matcher.stream()),
+            _ => None,
         };
+        let names = matcher
+            .as_ref()
+            .map_or_else(std::collections::BTreeSet::new, naming_metavariables);
+        let marker = matcher
+            .as_ref()
+            .map_or_else(String::new, internal_rule_marker);
         out.push(Rule {
             expansion: expansion.stream(),
+            marker,
             names,
         });
     }
 
     out
+}
+
+/// The internal-rule marker a matcher or an invocation opens with, or `""`.
+///
+/// # Why the pool has to be split at all
+///
+/// Arguments are gathered per macro *name* and every rule of that macro is then
+/// expanded against all of them, because a definition and its invocations need
+/// not share a file. For a single-rule macro that is exactly right. For a macro
+/// whose rules mean different things it manufactures expansions that the crate
+/// does not contain — and a guard that reports code nobody wrote is a guard
+/// somebody deletes.
+///
+/// `id_newtype!` is the case in hand. Its ordinary arm emits `new`,
+/// `From<&str>` and `From<String>`; its `@derived_only` arm deliberately does
+/// not. Pooling both arms together bound `RequirementId` — which is only ever
+/// passed to `@derived_only` — into the ordinary arm as well, synthesizing the
+/// three constructors that `only_derive_mints_a_requirement_id` exists to
+/// forbid, and failing on them.
+///
+/// # What is recognized, and why only that
+///
+/// The `@marker` convention only: a leading `@` and one identifier, which is
+/// how `macro_rules!` has always spelled an internal rule. Anything else
+/// returns `""` and lands in the shared pool, which is the previous behaviour.
+///
+/// That default is the fail-closed one. Sharing a pool over-approximates —
+/// rules get expanded against arguments they never receive — so the error it
+/// can cause is a false positive, which is loud. Splitting a pool too eagerly
+/// would under-approximate and hide a real violation, which is silent.
+fn internal_rule_marker(tokens: &TokenStream) -> String {
+    let mut trees = tokens.clone().into_iter();
+    let Some(TokenTree::Punct(at)) = trees.next() else {
+        return String::new();
+    };
+    if at.as_char() != '@' {
+        return String::new();
+    }
+    match trees.next() {
+        Some(TokenTree::Ident(name)) => format!("@{name}"),
+        _ => String::new(),
+    }
 }
 
 /// The `$name:ty`, `$name:ident` and `$name:path` metavariables a matcher
@@ -1013,7 +1067,11 @@ impl<'ast> syn::visit::Visit<'ast> for InvocationWalk {
         if name == "macro_rules" {
             return;
         }
-        let entry = self.found.entry(name).or_default();
+        // Keyed by name *and* marker, so `id_newtype! { @derived_only … }`
+        // and `id_newtype! { … }` fill separate pools. See
+        // [`internal_rule_marker`].
+        let key = format!("{name}{}", internal_rule_marker(&mac.tokens));
+        let entry = self.found.entry(key).or_default();
         identifiers(&mac.tokens, entry);
     }
 }
@@ -1054,13 +1112,14 @@ impl ItemWalk {
             .as_ref()
             .map_or_else(|| "<anonymous>".to_owned(), ToString::to_string);
 
-        let arguments: Vec<String> = self
-            .arguments
-            .get(&name)
-            .map(|idents| idents.iter().cloned().collect())
-            .unwrap_or_default();
-
         for rule in rules(&definition.mac.tokens) {
+            // Each rule draws only from the pool its own marker names.
+            let arguments: Vec<String> = self
+                .arguments
+                .get(&format!("{name}{}", rule.marker))
+                .map(|idents| idents.iter().cloned().collect())
+                .unwrap_or_default();
+
             let bound: Vec<Binding<'_>> = if mentions_any(&rule.expansion, &rule.names) {
                 arguments
                     .iter()
