@@ -151,7 +151,13 @@ fn nothing_converts_into_evidence_or_an_artifact() {
          \n\
          If you need to record that a capability could not be answered, that is \
          what `UnverifiedReason` is for — and it is the only thing a failure is \
-         allowed to become.",
+         allowed to become.\n\
+         \n\
+         If a line above is spelled nowhere in that file, it came out of a \
+         `macro_rules!` body: the reader binds every metavariable in a rule to \
+         the same identifier, so `impl From<$src> for $dst` is reported as \
+         `impl From<Evidence> for Evidence`. Open the macro, not the rendered \
+         line.",
         offenders.join("\n")
     );
 }
@@ -201,18 +207,29 @@ fn nothing_but_the_sanctioned_constructor_produces_one() {
     // — which is a laundering with an extra `Ok` around it. Nothing in the
     // workspace returns `Result<Evidence, _>`, so unwrapping costs nothing;
     // `download` is sanctioned by name and trait instead.
+    //
+    // A tuple return is read element by element and a same-file `type` alias is
+    // followed to the name it stands for, because both are ways of returning
+    // the value while writing a different word:
+    //
+    //     type Ev = Evidence;
+    //     fn launder(run: &CheckRun) -> Ev
+    //     fn launder(run: &CheckRun) -> (Evidence, u8)
+    //
+    // Neither is exotic. The first is what someone writes to shorten a
+    // signature; the second is what someone writes to return a diagnostic
+    // alongside the value.
     let mut offenders = Vec::new();
 
     for (path, file) in common::workspace_sources() {
         for function in common::functions(file.items()) {
-            let Some(produced) = function.returns.as_deref() else {
-                continue;
-            };
-            if !FORBIDDEN_TARGETS.contains(&produced) {
-                continue;
-            }
-            if !is_sanctioned(&function, produced) {
-                offenders.push(format!("{path}: fn {} -> {produced}", function.path()));
+            for produced in &function.produces {
+                if !FORBIDDEN_TARGETS.contains(&produced.as_str()) {
+                    continue;
+                }
+                if !is_sanctioned(&function, produced) {
+                    offenders.push(format!("{path}: fn {} -> {produced}", function.path()));
+                }
             }
         }
     }
@@ -562,4 +579,366 @@ fn a_macro_body_this_reader_cannot_parse_is_a_loud_failure() {
     // exactly the regression the macro fix exists to undo, reintroduced through
     // the fix's own escape hatch. This is what proves the panic is reachable.
     let _ = common::read("sample", "macro_rules! partial { ($t:ty) => { impl }; }\n");
+}
+
+#[test]
+fn a_cfg_this_reader_cannot_evaluate_still_ships_under_a_negation() {
+    // The blind spot the `cfg(not(test))` fix left behind, and the more
+    // dangerous half of it. The three existing `cfg` meta-tests cover
+    // `not(test)`, `all(test, feature = …)` and a bare `feature = …` — every
+    // one of which has an *evaluable* predicate somewhere in it. None covered
+    // `not(<something this reader cannot evaluate>)`, which is where treating
+    // unknown as `true` stopped being conservative: `!true` is `false`, so the
+    // item read as configured out and vanished from every guard in this file.
+    //
+    // None of these three is exotic. `not(target_os = …)` is how portable code
+    // is written; `not(feature = …)` is how a default is written. An `impl
+    // From<String> for Evidence` behind any of them compiles on every machine
+    // this workspace is built on.
+    let sample = common::read(
+        "sample",
+        r#"
+        #[cfg(not(target_os = "windows"))]
+        impl From<CheckRun> for Evidence {}
+        #[cfg(not(feature = "e2e"))]
+        impl From<CheckRun> for Artifact {}
+        #[cfg(all(not(feature = "x"), unix))]
+        impl From<CheckRun> for Adoption {}
+        #[cfg(any(test, not(unix)))]
+        impl From<CheckRun> for Report {}
+        #[cfg(all(not(test), feature = "e2e"))]
+        impl From<CheckRun> for Coverage {}
+        #[cfg(not(all(test, unix)))]
+        impl From<CheckRun> for Summary {}
+        #[cfg(not(any(test, unix)))]
+        impl From<CheckRun> for Trace {}
+        "#,
+    );
+    let targets: Vec<String> = common::conversions(sample.items())
+        .into_iter()
+        .map(|conversion| conversion.target)
+        .collect();
+
+    assert_eq!(
+        targets,
+        [
+            "Evidence", "Artifact", "Adoption", "Report", "Coverage", "Summary", "Trace"
+        ],
+        "a predicate this reader cannot evaluate is unknown, not false, and \
+         negating an unknown leaves it unknown — so every one of these ships. \
+         `not(all(test, unix))` in particular is true whenever `test` is off, \
+         whatever `unix` turns out to be."
+    );
+}
+
+#[test]
+fn a_negated_test_predicate_is_still_decided() {
+    // The other side of the same lattice, and the reason `Cfg::Other => None`
+    // is not simply "give up". `test` is the one predicate this reader really
+    // does know, and every combination that is decidable from it alone must
+    // still be decided — otherwise "unknown ships" would quietly readmit the
+    // `#[cfg(test)]` fixtures the guards exist to exclude.
+    let sample = common::read(
+        "sample",
+        r#"
+        #[cfg(test)]
+        impl From<CheckRun> for Evidence {}
+        #[cfg(not(not(test)))]
+        impl From<CheckRun> for Artifact {}
+        #[cfg(all(test, feature = "e2e"))]
+        impl From<CheckRun> for Adoption {}
+        #[cfg(any(test, all(test, unix)))]
+        impl From<CheckRun> for Report {}
+        "#,
+    );
+
+    assert!(
+        common::conversions(sample.items()).is_empty(),
+        "`all(test, …)` is false however the rest falls out, and a double \
+         negation of `test` is `test`"
+    );
+}
+
+#[test]
+fn a_macro_target_that_is_a_metavariable_is_read_from_the_invocation() {
+    // The bypass the placeholder substitution cannot reach on its own. When the
+    // metavariable is the *source* of the conversion the rule still sees the
+    // target written out, which is what the existing macro meta-test covers.
+    // When it is the *target*, the re-parsed impl reads `impl From<metavar_src>
+    // for metavar_dst` — a target no rule names — while the crate really
+    // contains `impl From<String> for Evidence`. The invocation is the only
+    // place the real name is written, and `syn` hands that back as opaque
+    // tokens too.
+    let sample = common::read(
+        "sample",
+        r"
+        macro_rules! conv {
+            ($src:ty => $dst:ty) => {
+                impl From<$src> for $dst {
+                    fn from(_value: $src) -> Self { unimplemented!() }
+                }
+            };
+        }
+        conv!(String => Evidence);
+        ",
+    );
+    let targets: Vec<String> = common::conversions(sample.items())
+        .into_iter()
+        .map(|conversion| conversion.target)
+        .collect();
+
+    assert!(
+        targets.iter().any(|target| target == "Evidence"),
+        "the identifier the invocation passes is what the metavariable stands \
+         for, and `Evidence` in the target position is the whole prohibition; \
+         found {targets:?}"
+    );
+    assert!(
+        targets
+            .iter()
+            .any(|target| FORBIDDEN_TARGETS.contains(&target.as_str())),
+        "and the guard's own rule fires on it"
+    );
+}
+
+#[test]
+fn an_invocation_in_another_file_still_binds_the_metavariable() {
+    // A `macro_rules!` definition and the invocation that binds it are not
+    // obliged to share a file — `#[macro_use]` and `#[macro_export]` are
+    // precisely the features that separate them. Reading each file alone would
+    // leave the target as `metavar_dst` forever, which is the same hole with an
+    // extra file in front of it.
+    let mut definition = common::read(
+        "definition",
+        r"
+        #[macro_export]
+        macro_rules! conv {
+            ($src:ty => $dst:ty) => {
+                impl From<$src> for $dst {
+                    fn from(_value: $src) -> Self { unimplemented!() }
+                }
+            };
+        }
+        ",
+    );
+    let invocation = common::read("invocation", "conv!(String => Evidence);\n");
+
+    assert!(
+        common::conversions(definition.items())
+            .iter()
+            .all(|conversion| conversion.target != "Evidence"),
+        "the definition alone names no forbidden target"
+    );
+
+    definition.expand_against(invocation.arguments());
+
+    assert!(
+        common::conversions(definition.items())
+            .iter()
+            .any(|conversion| conversion.target == "Evidence"),
+        "and pooling the arguments from the other file is what finds it — which \
+         is what `workspace_sources` does across the whole workspace"
+    );
+}
+
+#[test]
+fn a_return_type_behind_an_alias_or_in_a_tuple_is_still_a_producer() {
+    // Both rules that key on a return type key on a *written name*, and there
+    // are two cheap ways to write a different one. `type Ev = Evidence;` is
+    // what someone reaches for to shorten a signature; `-> (Evidence, u8)` is
+    // what someone reaches for to return a diagnostic alongside the value. The
+    // tuple was the worse of the two: `base_ident` returns nothing for a tuple,
+    // so the function read as returning nothing at all.
+    let sample = common::read(
+        "sample",
+        r"
+        type Ev = Evidence;
+        type Same = Ev;
+        fn launder(_run: &CheckRun) -> Ev { unimplemented!() }
+        fn chained(_run: &CheckRun) -> Same { unimplemented!() }
+        fn paired(_run: &CheckRun) -> (Evidence, u8) { unimplemented!() }
+        fn wrapped(_run: &CheckRun) -> Option<(u8, Artifact)> { unimplemented!() }
+        fn honest(_run: &CheckRun) -> EvidenceBundle { unimplemented!() }
+        ",
+    );
+    let read = common::functions(sample.items());
+    let producers: Vec<String> = read
+        .iter()
+        .filter(|function| {
+            function
+                .produces
+                .iter()
+                .any(|name| FORBIDDEN_TARGETS.contains(&name.as_str()))
+        })
+        .map(|function| function.path())
+        .collect();
+
+    assert_eq!(
+        producers,
+        ["launder", "chained", "paired", "wrapped"],
+        "an alias, an alias chain, a tuple element and a tuple inside a \
+         transparent wrapper all produce one — and `EvidenceBundle` still does \
+         not"
+    );
+
+    for function in &read {
+        assert!(
+            !is_sanctioned(function, "Evidence") && !is_sanctioned(function, "Artifact"),
+            "and none of these is the sanctioned constructor"
+        );
+    }
+}
+
+#[test]
+fn a_conversion_into_an_alias_is_a_conversion_into_the_type() {
+    // The same laundering on the conversion rule rather than the producer rule.
+    // `impl From<CheckRun> for Ev` is the forbidden impl and the compiler knows
+    // it; a rule matching the written word `Evidence` did not.
+    let sample = common::read(
+        "sample",
+        r"
+        type Ev = Evidence;
+        impl From<CheckRun> for Ev {}
+        impl Into<Ev> for CheckRun {}
+        ",
+    );
+
+    assert!(
+        common::conversions(sample.items())
+            .iter()
+            .all(|conversion| conversion.target == "Evidence"),
+        "both spellings, through the alias, land on `Evidence`"
+    );
+}
+
+#[test]
+fn a_macro_standing_where_a_type_goes_is_expanded_not_ignored() {
+    // The shortest bypass of this file's prohibition that exists. `syn` parses
+    // `ev!()` as `Type::Macro`, the type reader dropped it on its catch-all
+    // arm, and the conversion came back with no target at all — so three lines
+    // put `impl From<String> for Evidence` in the shipped crate with every
+    // guard in this directory green.
+    //
+    // It is the other half of the mechanism this file already handles at the
+    // macro *definition*: a type-position expansion declares nothing, which is
+    // why the reader passes over it, and passing over it is exactly what made
+    // the invocation invisible. Closing one without the other closes nothing.
+    let sample = common::read(
+        "sample",
+        r"
+        macro_rules! ev { () => { Evidence }; }
+        macro_rules! art { () => { Artifact }; }
+        impl From<String> for ev!() {
+            fn from(_value: String) -> Self { unimplemented!() }
+        }
+        pub fn launder(_conclusion: &str) -> art!() { unimplemented!() }
+        ",
+    );
+    let items = sample.items();
+
+    assert_eq!(
+        common::conversions(items)
+            .into_iter()
+            .map(|conversion| conversion.target)
+            .collect::<Vec<_>>(),
+        ["Evidence"],
+        "the macro in the `for` position names the type it expands to"
+    );
+
+    let producers: Vec<String> = common::functions(items)
+        .into_iter()
+        .filter(|function| {
+            function
+                .produces
+                .iter()
+                .any(|name| FORBIDDEN_TARGETS.contains(&name.as_str()))
+        })
+        .map(|function| function.path())
+        .collect();
+    assert_eq!(
+        producers,
+        ["ev!::from", "launder"],
+        "and so does one in the return position — including the `from` the \
+         conversion itself declares, whose `-> Self` is the macro's type. The \
+         owner is reported as written rather than as what it expands to, \
+         because `ev!::from` sends a reader to the line that is actually there \
+         while `Evidence::from` sends them looking for one that is not"
+    );
+}
+
+#[test]
+#[should_panic(expected = "macro invocation standing where a type goes")]
+fn a_type_position_macro_this_reader_cannot_expand_is_a_loud_failure() {
+    // The half that makes the fix above worth anything. A macro defined in
+    // another file or another crate cannot be expanded here, and the two
+    // guesses available are both wrong: calling it forbidden fails on legal
+    // code, calling it harmless is the bypass. So the reader stops, and this is
+    // what proves it actually does rather than falling back to a silent miss.
+    let _ = common::conversions(
+        common::read("sample", "impl From<String> for elsewhere!() {}\n").items(),
+    );
+}
+
+#[test]
+fn an_invocation_inside_a_macro_body_still_binds_the_inner_macro() {
+    // Critical 2 reopened one layer down. The invocation pool was collected
+    // from the file and never from the expansions, so a macro whose body
+    // invokes another macro left the inner one's metavariables unbound — and
+    // `impl From<$src> for $dst` went back to reading as a conversion into
+    // `metavar_dst`, which nothing forbids.
+    //
+    // The shape is what someone writes to tidy a file, not to hide anything:
+    // collapsing eleven `id_newtype!` calls into one `ids! { A, B, C }` is
+    // exactly this, and it would unbind `$name` for a whole crate.
+    let sample = common::read(
+        "sample",
+        r"
+        macro_rules! conv {
+            ($src:ty => $dst:ty) => {
+                impl From<$src> for $dst {
+                    fn from(_value: $src) -> Self { unimplemented!() }
+                }
+            };
+        }
+        macro_rules! outer { () => { conv!(String => Evidence); }; }
+        outer!();
+        ",
+    );
+
+    assert!(
+        common::conversions(sample.items())
+            .iter()
+            .any(|conversion| conversion.target == "Evidence"),
+        "the pool is iterated until no expansion turns up an invocation nobody \
+         had counted, so one layer of indirection is not a hiding place"
+    );
+}
+
+#[test]
+fn an_alias_chain_longer_than_any_step_limit_is_still_followed() {
+    // The reader used to give up after sixteen links and return the unresolved
+    // name, which is a producer read as harmless — the one direction this
+    // module says it never goes. A step limit is a cliff; the fix is to
+    // remember where it has been instead of counting.
+    let depth = 40;
+    let mut source = String::from("type Link0 = Evidence;\n");
+    for step in 1..=depth {
+        source.push_str(&format!("type Link{step} = Link{};\n", step - 1));
+    }
+    source.push_str(&format!(
+        "pub fn launder(_conclusion: &str) -> Link{depth} {{ unimplemented!() }}\n"
+    ));
+    let sample = common::read("sample", &source);
+
+    let producers: Vec<String> = common::functions(sample.items())
+        .into_iter()
+        .filter(|function| function.produces.iter().any(|name| name == "Evidence"))
+        .map(|function| function.path())
+        .collect();
+
+    assert_eq!(
+        producers,
+        ["launder"],
+        "forty links is still `Evidence`, and so is four hundred"
+    );
 }
