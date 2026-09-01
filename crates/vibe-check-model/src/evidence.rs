@@ -76,8 +76,11 @@ pub struct CaseOutcome {
     pub status: CaseStatus,
     /// Wall-clock duration in milliseconds, when the tool reported one.
     ///
-    /// Display only — excluded from verdict digests, because it varies run to
-    /// run and would make replay comparisons fail for no reason.
+    /// Display only, and outside the verdict digest by construction rather than
+    /// by exclusion: [`digest::VERDICT_DIGEST_PATHS`](crate::digest) enumerates
+    /// what that digest covers, so a duration that varies run to run cannot
+    /// enter it and make replay comparisons fail for no reason. Nothing has to
+    /// remember to keep it out.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub duration_ms: Option<u64>,
     /// Where the case lives.

@@ -188,10 +188,15 @@ non-UTF-8 path silently changes crate attribution), and the methods
 
 Enforcing files: `crates/vibe-check-host/src/vcs.rs` — `Vcs::committer_date` is
 the decision clock; `crates/vibe-check-host/src/clock.rs` — the sanctioned
-wall-clock exception, whose every field is on the digest's exclusion list and is
-display-only; `crates/vibe-check/src/assembly.rs` and
+wall-clock exception, whose every field is display-only and therefore outside
+`verdict_digest`, which enumerates what it covers rather than what it drops
+(`crates/vibe-check-model/src/digest.rs`);
+`crates/vibe-check/src/assembly.rs` and
 `crates/vibe-check-model/src/bundle.rs` — `BTreeSet` and `BTreeMap` in
-everything that reaches a digest; `crates/vibe-check/src/scheduler.rs` — sorts
+everything that reaches a digest; `crates/vibe-check-model/src/digest.rs` —
+canonicalization and the two digests, whose path lists are data in one place so
+that what a digest covers can be read and tested as a set;
+`crates/vibe-check/src/scheduler.rs` — sorts
 completion order away, because how long each tool happened to take is not
 something anything downstream may depend on.
 
@@ -203,11 +208,13 @@ held to our own standard.
 Two gaps, stated plainly:
 
 - **The replay-corpus test does not exist.** `clippy.toml` describes it as "the
-  real guarantee", and `BundleCore::verdict_digest` is declared in
-  `crates/vibe-check-model/src/bundle.rs` and never computed anywhere in the
-  workspace. `vibe-check replay` is declared in `crates/vibe-check/src/cli.rs`
-  and unimplemented. Enforcement lands with the milestone that writes the first
-  bundle; until then determinism rests on the lints and the proptests alone.
+  real guarantee". `verdict_digest` and `bundle_id` are now computed —
+  `crates/vibe-check-model/src/digest.rs`, over RFC 8785 canonical JSON — but
+  nothing calls them: no code writes a bundle, no golden bundle is committed,
+  and `vibe-check replay` is declared in `crates/vibe-check/src/cli.rs` and
+  unimplemented. Enforcement lands with the milestone that writes the first
+  bundle; until then determinism rests on the lints, the proptests, and
+  `digest.rs`'s own tests.
 - **The `fs` wrapper does not exist.** `clippy.toml` tells you to use it instead
   of `std::fs::read_dir`, and there is no such module. Whoever needs the first
   directory walk owns writing it — in `vibe-check-host`, alongside the other

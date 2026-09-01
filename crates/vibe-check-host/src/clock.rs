@@ -10,9 +10,18 @@
 //! reason about.
 //!
 //! **Display time** is this module. It stamps "generated at" into the bundle and
-//! measures durations for the report. Every field it produces is on the
-//! digest's exclusion list, so it cannot affect a verdict or make two identical
-//! evaluations compare unequal.
+//! measures durations for the report. It cannot affect a verdict, and it does
+//! not do so by being remembered on an exclusion list: `verdict_digest` names
+//! the paths it covers and covers nothing else
+//! (`vibe_check_model::digest::VERDICT_DIGEST_PATHS`), so a field this module
+//! produces is outside the digest by construction — a new display field is out
+//! by default rather than out until somebody forgets.
+//!
+//! The one list a display field must be *added* to is
+//! `vibe_check_model::digest::BUNDLE_ID_EXCLUDED_PATHS`. `bundle_id` is a
+//! content address and therefore covers everything by default, so a timestamp
+//! left off it would give two identical evaluations different identifiers. No
+//! such field is on the bundle yet.
 //!
 //! `clippy.toml` bans `SystemTime::now` and `Instant::now` workspace-wide. This
 //! module is the sanctioned exception, which is why it is this small.
