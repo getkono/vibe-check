@@ -83,8 +83,9 @@ pub struct BundleCore {
     /// reintroduce exactly the blocking behaviour advisory exists to remove;
     /// the requirement is to report loudly, not to report and block.
     ///
-    /// On the digest inclusion list — see #27 and #45, which write the first
-    /// bundle and the digest that covers it.
+    /// On the digest inclusion list — see
+    /// [`VERDICT_DIGEST_PATHS`](crate::digest::VERDICT_DIGEST_PATHS), which now
+    /// names it, and #45, which writes the first bundle.
     pub advisory_tier: Tier,
     /// Every risk flag the classifier emitted, sorted.
     pub flag_ids: Vec<RiskFlagId>,
@@ -125,8 +126,19 @@ pub struct BundleCore {
     pub capability_states: BTreeMap<CapabilityId, ResolutionState>,
     /// Digest over the canonicalized verdict-bearing subtree.
     ///
-    /// Excludes timestamps and durations, so the same inputs produce the same
-    /// digest. This is what the replay test compares.
+    /// Computed by [`digest::verdict_digest`](crate::digest::verdict_digest),
+    /// which covers exactly the paths in
+    /// [`VERDICT_DIGEST_PATHS`](crate::digest::VERDICT_DIGEST_PATHS) and
+    /// nothing else. An inclusion list rather than an exclusion list, so that
+    /// adding a section to the bundle cannot change a historical digest and
+    /// fail the replay corpus over something that is not a verdict. Timestamps
+    /// and durations are outside it by construction. This is what the replay
+    /// test compares.
+    ///
+    /// A `String` and not a
+    /// [`Digest`](crate::digest::Digest): the wire name and shape of this field
+    /// are the permanent contract, and a newtype that grew a variant or a
+    /// second rendering would put that at risk for no gain.
     pub verdict_digest: String,
 }
 
@@ -805,9 +817,9 @@ mod tests {
     #[test]
     fn the_advisory_tier_is_written_in_the_documented_wire_form() {
         // The escape-rate loop parses this JSON, not this crate's types, so the
-        // form is the contract. There is no digest in this workspace yet — see
-        // #45, which writes the first bundle and must add `advisory_tier` to the
-        // digest inclusion list — so the wire form is what can be proved here.
+        // form is the contract. `core/advisory_tier` is now on the inclusion
+        // list in `crate::digest`, which has its own test that every listed
+        // path resolves; what is proved *here* is the wire form the loop reads.
         let json = serde_json::to_value(bundle()).expect("serialize");
         let core = json.get("core").expect("core present");
 

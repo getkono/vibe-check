@@ -34,6 +34,7 @@
 
 pub mod adjudicate;
 pub mod bundle;
+pub mod digest;
 pub mod evidence;
 pub mod ids;
 pub mod known;
@@ -50,6 +51,11 @@ pub use adjudicate::{
     Enforcement, Escalation,
 };
 pub use bundle::{BundleCore, Confidence, EvidenceBundle, Generator};
+pub use digest::{
+    BUNDLE_ID_EXCLUDED_PATHS, CanonicalError, DEFERRED_VERDICT_DIGEST_PATHS, Digest, DigestError,
+    DigestParseError, DigestPath, VERDICT_DIGEST_PATHS, bundle_id, canonicalize, digest_of,
+    verdict_digest,
+};
 pub use evidence::{
     CaseOutcome, CaseStatus, Evidence, EvidenceFacts, LocatedFinding, Metric, ParsedEvidence,
     Provenance, RawRef, Severity,
