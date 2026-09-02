@@ -57,7 +57,19 @@
 publish            = false
 # The single-package template, chosen rather than inherited — the inherited one
 # is per-package, for the reason above.
-git_tag_name       = "v{{ version }}"
+# Two namespaces, deliberately disjoint.
+#
+# `binaries-v0.1.0` is a *source release*: release-plz cuts it at the commit it
+# released, and .github/workflows/release-binaries.yml attaches the five
+# platform archives and their SHA256SUMS to it.
+#
+# `v0.1.0` and `v0` are *action releases*: tags on a later master commit whose
+# tree carries dist/RELEASE and dist/SHA256SUMS naming that source release.
+# They have to be a different name, because the tree at a source-release tag
+# cannot contain the digests of binaries that do not exist until after it is
+# tagged. That circularity is the whole reason for the split; the long form is
+# in docs/releasing.md under "Why two tag namespaces".
+git_tag_name       = "binaries-v{{ version }}"
 git_tag_enable     = false
 git_release_enable = false
 

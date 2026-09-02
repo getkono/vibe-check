@@ -1,0 +1,444 @@
+name: Release binaries
+
+# Triggered by the Release-plz workflow *completing* — not by the release it
+# creates, and not by the tag it pushes.
+#
+# Unless the #5 App credentials are configured, release-plz cuts the release
+# with `secrets.GITHUB_TOKEN`. GitHub's loop prevention means nothing created by
+# that token fires a `release` or a `push: tags` event, so `on: release` and
+# `on: push: tags` would both be silently dead here — a tag with no binaries and
+# no failed job to notice it. `workflow_run` fires on the *run*, and that run
+# was started by a human's push to master, so loop prevention does not apply.
+# This is why shipping binaries does not wait on #5.
+#
+# `workflows:` matches the `name:` of release-plz.yml. Renaming that workflow
+# silently disables this one, so dist/lint-surface.sh asserts the two strings
+# still agree.
+#
+# Two things about `workflow_run` that are easy to get wrong, handled below
+# rather than discovered later:
+#   1. It only ever runs from the copy of this file on the DEFAULT BRANCH. This
+#      workflow cannot be tested from a feature branch; it will never fire.
+#   2. It always runs with `github.ref` = refs/heads/master. A bare checkout
+#      gives you master, NOT the released tag, so every job that needs released
+#      source names the tag explicitly.
+on:
+  workflow_run:
+    workflows: ["Release-plz"]
+    types:
+      - completed
+
+permissions: {}
+
+# One release at a time, never cancelled: this workflow uploads release assets,
+# pushes a commit to master and moves a tag. A cancelled run leaves a partial,
+# non-atomic set. Same reasoning as release-plz.yml's own concurrency block.
+concurrency:
+  group: release-binaries
+  cancel-in-progress: false
+
+jobs:
+  resolve:
+    name: Resolve the released tag
+    runs-on: ubuntu-latest
+    # This fires for every Release-plz completion, including the PR-only runs
+    # where nothing was released, and including failures.
+    if: >-
+      github.repository == 'getkono/vibe-check'
+      && github.event.workflow_run.conclusion == 'success'
+      && github.event.workflow_run.event == 'push'
+      && github.event.workflow_run.head_branch == 'master'
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      released: ${{ steps.resolve.outputs.released }}
+      tag: ${{ steps.resolve.outputs.tag }}
+      version: ${{ steps.resolve.outputs.version }}
+    steps:
+      # The only authoritative statement of what was released, written by the
+      # run that did it. Absence is the "nothing was released" signal, which is
+      # the common case, so this step is allowed to fail.
+      - name: Fetch what Release-plz recorded
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          name: release-dispatch
+          path: release-dispatch
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Resolve and cross-check
+        id: resolve
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          RUN_ID: ${{ github.event.workflow_run.id }}
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          set -euo pipefail
+          if [ ! -f release-dispatch/release.json ]; then
+            echo "Release-plz run ${RUN_ID} cut no release — nothing to build."
+            echo "released=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          tag="$(jq -er .tag release-dispatch/release.json)"
+          version="$(jq -er .version release-dispatch/release.json)"
+          sha="$(jq -er .sha release-dispatch/release.json)"
+
+          # The artifact is a claim, not proof. Resolve the tag through the API
+          # and require it to point at the commit the triggering run ran on, so
+          # a stale or hand-uploaded `release-dispatch` artifact cannot make
+          # this workflow build some other tree and publish it under a released
+          # name.
+          ref="$(gh api "repos/${GH_REPO}/git/ref/tags/${tag}")"
+          object_sha="$(printf '%s' "$ref" | jq -r .object.sha)"
+          if [ "$(printf '%s' "$ref" | jq -r .object.type)" = "tag" ]; then
+            object_sha="$(gh api "repos/${GH_REPO}/git/tags/${object_sha}" --jq .object.sha)"
+          fi
+          if [ "$object_sha" != "$sha" ] || [ "$sha" != "$HEAD_SHA" ]; then
+            echo "::error::tag ${tag} -> ${object_sha}; release-plz ran on ${sha}; workflow_run head is ${HEAD_SHA}"
+            exit 1
+          fi
+
+          echo "Building ${tag} (version ${version}) at ${sha}"
+          {
+            echo "released=true"
+            echo "tag=$tag"
+            echo "version=$version"
+          } >> "$GITHUB_OUTPUT"
+
+  build:
+    name: Build ${{ matrix.target }}
+    needs: resolve
+    if: needs.resolve.outputs.released == 'true'
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
+    strategy:
+      # All five or none. The @vN promotion policy refuses to move an alias onto
+      # a release with a partial asset set, so a partial set is only ever wasted
+      # work — and `fail-fast: false` would produce exactly that.
+      fail-fast: true
+      matrix:
+        include:
+          - {os: ubuntu-latest, target: x86_64-unknown-linux-musl, use_cross: true}
+          - {os: ubuntu-latest, target: aarch64-unknown-linux-musl, use_cross: true}
+          - {os: macos-latest, target: x86_64-apple-darwin, use_cross: false}
+          - {os: macos-latest, target: aarch64-apple-darwin, use_cross: false}
+          - {os: windows-latest, target: x86_64-pc-windows-msvc, use_cross: false}
+    steps:
+      - name: Checkout the released tag
+        uses: actions/checkout@v6
+        with:
+          # NOT the default. `workflow_run` runs on the default branch, so
+          # without this the release would ship master's HEAD under the tag's
+          # name — a silently wrong binary.
+          ref: ${{ needs.resolve.outputs.tag }}
+          persist-credentials: false
+
+      # `dtolnay/rust-toolchain@stable`, which the other binary-shipping repos
+      # in this org use, would install a different compiler than every other job
+      # here. rust-toolchain.toml states why that is not a matter of taste: the
+      # toolchain is an input to every verdict.
+      - name: Install the pinned toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup show
+          rustup target add "${{ matrix.target }}"
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          # Distinct from ci.yml's `quality`, which holds debug and test
+          # artifacts for the host triple only.
+          shared-key: release-${{ matrix.target }}
+
+      - name: Install cross
+        if: matrix.use_cross
+        uses: taiki-e/install-action@cross
+
+      - name: Build
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+          USE_CROSS: ${{ matrix.use_cross }}
+        run: |
+          set -euo pipefail
+          # No Cross.toml and no exported build metadata, unlike the other
+          # binary-shipping repos in this org: `find . -name build.rs` is empty
+          # in this workspace, so there is no build script to feed. `--locked`
+          # because a release must build the versions Cargo.lock records.
+          if [ "$USE_CROSS" = "true" ]; then
+            cross build --release --locked --target "$TARGET" \
+              --bin vibe-check --bin cargo-vibe-check
+          else
+            cargo build --release --locked --target "$TARGET" \
+              --bin vibe-check --bin cargo-vibe-check
+          fi
+
+      - name: Package
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+          VERSION: ${{ needs.resolve.outputs.version }}
+        run: |
+          set -euo pipefail
+          # `.tar.gz` for every target, Windows included. The composite action
+          # unpacks this on all five runner operating systems; `tar` is present
+          # on windows-latest and reachable from Git Bash, `unzip` is not
+          # guaranteed. One archive format is one extraction path in the action,
+          # and the action is the component that must not be subtle.
+          stage="vibe-check-${VERSION}-${TARGET}"
+          mkdir -p "$stage"
+          ext=""
+          # An `if`, not `[ ... ] && ext=.exe`: under `set -e` a false test as
+          # the last command of a script aborts it.
+          if [ "$RUNNER_OS" = "Windows" ]; then ext=".exe"; fi
+          cp "target/${TARGET}/release/vibe-check${ext}" "$stage/"
+          cp "target/${TARGET}/release/cargo-vibe-check${ext}" "$stage/"
+          cp LICENSE README.md "$stage/"
+          tar -czf "${stage}.tar.gz" "$stage"
+          ls -l "${stage}.tar.gz"
+
+      - name: Upload the archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: vibe-check-${{ matrix.target }}
+          path: vibe-check-${{ needs.resolve.outputs.version }}-${{ matrix.target }}.tar.gz
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    name: Attach the binaries and their digests
+    needs: [resolve, build]
+    if: needs.resolve.outputs.released == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      # The only thing this job may do. It holds no source from the released tag
+      # and runs nothing built from it.
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+          path: assets
+
+      - name: Compute the digests
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd assets
+          # An archive missing here is the failure the @vN policy exists to
+          # prevent. `fail-fast: true` above should make it impossible; this is
+          # the assertion that says so out loud.
+          actual="$(find . -maxdepth 1 -name 'vibe-check-*.tar.gz' | wc -l)"
+          if [ "$actual" -ne 5 ]; then
+            echo "::error::expected 5 archives, found ${actual}"
+            ls -l
+            exit 1
+          fi
+          # Sorted, so the committed file is byte-stable across runs and a diff
+          # on dist/SHA256SUMS shows only what actually changed.
+          sha256sum vibe-check-*.tar.gz | sort -k2 > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Attach everything to the release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ needs.resolve.outputs.tag }}
+        run: |
+          set -euo pipefail
+          gh release upload "$TAG" assets/vibe-check-*.tar.gz assets/SHA256SUMS --clobber
+
+      - name: Hand the digests to the promotion job
+        uses: actions/upload-artifact@v4
+        with:
+          name: sha256sums
+          path: assets/SHA256SUMS
+          if-no-files-found: error
+          retention-days: 7
+
+  promote:
+    name: Commit the digests and move the action tags
+    needs: [resolve, build, publish]
+    if: needs.resolve.outputs.released == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout master
+        uses: actions/checkout@v6
+        with:
+          ref: master
+          # Needed to read the previous alias's lock file for the
+          # never-backwards check, and to push.
+          fetch-depth: 0
+          # persist-credentials left at its default because this job pushes. It
+          # is the only job here that holds a credential, and it deliberately
+          # never checks out the released tag and never runs anything built
+          # from it.
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: sha256sums
+          path: incoming
+
+      # The step that makes the whole exercise mean something. Download
+      # anonymously from the public release, exactly as a consumer's runner
+      # will, and check the bytes GitHub actually serves against the digests
+      # computed on the build runners. Catches a truncated or failed upload and
+      # a CDN still serving nothing, BEFORE any tag points at it.
+      - name: Verify what GitHub actually serves
+        shell: bash
+        env:
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ needs.resolve.outputs.tag }}
+        run: |
+          set -euo pipefail
+          mkdir -p verify
+          cp incoming/SHA256SUMS verify/
+          cd verify
+          while read -r _ name; do
+            ok=false
+            for attempt in 1 2 3 4 5; do
+              if curl -fsSL --connect-timeout 10 --max-time 300 -o "$name" \
+                   "https://github.com/${GH_REPO}/releases/download/${TAG}/${name}"; then
+                ok=true
+                break
+              fi
+              echo "attempt ${attempt} for ${name} failed; backing off"
+              sleep "$(( attempt * attempt * 3 ))"
+            done
+            if [ "$ok" != true ]; then
+              echo "::error::could not download ${name} from ${TAG}"
+              exit 1
+            fi
+          done < SHA256SUMS
+          sha256sum -c SHA256SUMS
+
+      - name: Apply the promotion policy
+        id: policy
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ needs.resolve.outputs.tag }}
+          VERSION: ${{ needs.resolve.outputs.version }}
+        run: |
+          set -euo pipefail
+          major="${VERSION%%.*}"
+          alias="v${major}"
+
+          # NEVER TO A PRERELEASE. Two independent checks, because either alone
+          # can be wrong: the version string, and what GitHub says the release
+          # is.
+          case "$VERSION" in
+            *-*)
+              echo "::error::${VERSION} is a prerelease; not promoting"
+              exit 1
+              ;;
+          esac
+          if [ "$(gh release view "$TAG" --json isPrerelease --jq .isPrerelease)" != "false" ]; then
+            echo "::error::release ${TAG} is marked prerelease; not promoting"
+            exit 1
+          fi
+
+          # IMMUTABLE MEANS IMMUTABLE.
+          if git rev-parse --verify --quiet "refs/tags/v${VERSION}" >/dev/null; then
+            echo "::error::action tag v${VERSION} already exists and is immutable"
+            exit 1
+          fi
+
+          # NEVER BACKWARDS. The alias's current position records, in its own
+          # tree, which version it points at.
+          if git rev-parse --verify --quiet "refs/tags/${alias}" >/dev/null; then
+            previous="$(git show "refs/tags/${alias}:dist/RELEASE" | awk '$1=="version"{print $2}')"
+            newest="$(printf '%s\n%s\n' "$previous" "$VERSION" | sort -V | tail -1)"
+            if [ "$previous" = "$VERSION" ] || [ "$newest" != "$VERSION" ]; then
+              echo "::error::${alias} is at ${previous}; refusing to move it to ${VERSION}"
+              exit 1
+            fi
+          fi
+
+          echo "alias=$alias" >> "$GITHUB_OUTPUT"
+
+      - name: Commit the digests
+        id: commit
+        shell: bash
+        env:
+          TAG: ${{ needs.resolve.outputs.tag }}
+          VERSION: ${{ needs.resolve.outputs.version }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          {
+            echo "# Which release the composite action downloads its binary from,"
+            echo "# and therefore what dist/SHA256SUMS describes."
+            echo "#"
+            echo "# Written by .github/workflows/release-binaries.yml. Never edit by hand:"
+            echo "# the digests beside it were verified against the bytes GitHub serves,"
+            echo "# and a hand edit is indistinguishable from an attack."
+            echo "tag ${TAG}"
+            echo "version ${VERSION}"
+          } > dist/RELEASE
+          cp incoming/SHA256SUMS dist/SHA256SUMS
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add dist/RELEASE dist/SHA256SUMS
+          if git diff --cached --quiet; then
+            echo "dist/ already describes ${TAG} — nothing to commit."
+          else
+            git commit -m "chore(dist): pin the action to ${TAG}"
+            # master carries no branch protection and no ruleset, so the
+            # built-in token can push. A push made with GITHUB_TOKEN triggers no
+            # workflow, so this commit cannot re-enter Release-plz and cannot
+            # loop — and even if it could, release-plz would find the tag
+            # already present and report releases_created=false.
+            #
+            # If this ever fails with "protected branch", the fallback is in
+            # docs/releasing.md under "If master becomes protected". Do not
+            # reach for a personal access token.
+            git push origin HEAD:master
+          fi
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Tag the action
+        shell: bash
+        env:
+          ALIAS: ${{ steps.policy.outputs.alias }}
+          VERSION: ${{ needs.resolve.outputs.version }}
+          SHA: ${{ steps.commit.outputs.sha }}
+        run: |
+          set -euo pipefail
+          git tag "v${VERSION}" "$SHA"
+          git push origin "refs/tags/v${VERSION}"
+          # The alias is force-moved; that is what a moving tag means. It is the
+          # only force-push this repository performs, and the policy checks
+          # above are the whole of what makes it safe.
+          git tag -f "$ALIAS" "$SHA"
+          git push --force origin "refs/tags/${ALIAS}"
+
+      - name: Say what happened
+        shell: bash
+        env:
+          ALIAS: ${{ steps.policy.outputs.alias }}
+          VERSION: ${{ needs.resolve.outputs.version }}
+          TAG: ${{ needs.resolve.outputs.tag }}
+        run: |
+          {
+            echo "### vibe-check ${VERSION} promoted"
+            echo
+            echo "| | |"
+            echo "|---|---|"
+            echo "| source release | \`${TAG}\` |"
+            echo "| immutable action ref | \`v${VERSION}\` |"
+            echo "| moving alias | \`${ALIAS}\` |"
+            echo
+            echo '```yaml'
+            echo "- uses: getkono/vibe-check@v${VERSION}"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

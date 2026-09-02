@@ -1,0 +1,93 @@
+name: vibe-check
+description: Classify a pull request's diff into risk flags, from the CI you already run.
+author: getkono
+branding:
+  icon: check-circle
+  color: purple
+
+# ---------------------------------------------------------------------------
+# THE INPUT SURFACE IS FROZEN AT THESE TWO ENTRIES.
+#
+# crates/vibe-check/src/cli.rs states the reason, and it applies twice as hard
+# here: every knob added becomes an action input, and an input list that grows
+# means every new option needs an Action release that consumers pinned to @v1
+# will never receive. Configuration belongs in the policy document, which is
+# versioned, reviewable, and read from the merge base.
+#
+# Runtime concerns travel through the ENVIRONMENT instead, which is not part of
+# this surface and needs no Action release:
+#
+#   VIBE_CHECK_BINARY  absolute path to a pre-staged binary. Skips the download
+#                      and the digest check entirely — for air-gapped and
+#                      self-hosted runners, where the operator supplies the
+#                      bytes and therefore owns their provenance.
+#   VIBE_CHECK_BASE    the revision to compare against.
+#   RUST_LOG           diagnostics, on stderr.
+#
+# Adding a third input is a major version. dist/lint-surface.sh asserts this
+# list is exactly the two entries below.
+# ---------------------------------------------------------------------------
+inputs:
+  config-file:
+    description: >-
+      Path to the policy document, relative to the workspace root. Defaults to
+      the binary's own default, `.vibe-check/policy.toml`.
+    required: false
+    default: ""
+  config-inline:
+    description: >-
+      The policy document itself, inline. Written to a file under RUNNER_TEMP
+      and passed to the binary. Mutually exclusive with config-file; setting
+      both is an error rather than a precedence rule nobody would remember.
+    required: false
+    default: ""
+
+outputs:
+  verdict-file:
+    description: >-
+      Absolute path to the written vibe-check.json. Also uploaded as a workflow
+      artifact; this output is for a later step in the same job.
+    value: ${{ steps.classify.outputs.verdict-file }}
+
+runs:
+  using: composite
+  steps:
+    # First, before any network call and before anything is executed.
+    - name: Guard the trigger and the checkout
+      shell: bash
+      run: bash "$GITHUB_ACTION_PATH/dist/guard.sh"
+
+    - name: Resolve and verify the binary
+      id: binary
+      shell: bash
+      env:
+        # For the error message when a ref carries no pinned release.
+        ACTION_REF: ${{ github.action_ref }}
+        ACTION_REPO: ${{ github.action_repository }}
+      run: bash "$GITHUB_ACTION_PATH/dist/install.sh"
+
+    - name: Classify
+      id: classify
+      shell: bash
+      env:
+        VIBE_CHECK_BIN: ${{ steps.binary.outputs.path }}
+        # Through the environment, never interpolated into a script body: an
+        # input is attacker-controlled in a fork's workflow file.
+        INPUT_CONFIG_FILE: ${{ inputs.config-file }}
+        INPUT_CONFIG_INLINE: ${{ inputs.config-inline }}
+      run: bash "$GITHUB_ACTION_PATH/dist/classify.sh"
+
+    # `always()`, so the JSON is uploaded even when the verdict is non-zero —
+    # the case a reviewer most wants to download.
+    - name: Upload vibe-check.json
+      if: always() && steps.classify.outputs.verdict-file != ''
+      uses: actions/upload-artifact@v4
+      with:
+        # `github.job` disambiguates two invocations in one workflow run;
+        # upload-artifact rejects a duplicate name. Running this action more
+        # than once per job is not supported — the strategy context is not
+        # readable from inside a composite action.
+        name: vibe-check-${{ github.job }}
+        path: ${{ steps.classify.outputs.verdict-file }}
+        if-no-files-found: error
+        retention-days: 14
