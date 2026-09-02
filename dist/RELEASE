@@ -1,0 +1,8 @@
+# Which release the composite action downloads its binary from,
+# and therefore what dist/SHA256SUMS describes.
+#
+# Written by .github/workflows/release-binaries.yml. Never edit by hand:
+# the digests beside it were verified against the bytes GitHub serves,
+# and a hand edit is indistinguishable from an attack.
+tag binaries-v0.1.0
+version 0.1.0
