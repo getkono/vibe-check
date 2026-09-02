@@ -97,6 +97,33 @@ anything. A conclusion of `success` says the run worked, not that it released.
 The tag therefore travels as an artifact written by the run that knows it, and
 **the artifact's absence is the signal that nothing was released**.
 
+## The name `vibe-check` is taken on crates.io, and it disabled this chain
+
+Worth knowing before anything here is debugged, because the symptom is silence.
+
+`publish = false` skips `cargo publish` and nothing else. release-plz still asks
+the **cargo registry** what the latest released version of a package is — and
+`vibe-check` on crates.io is an unrelated project, published at 0.3.2 since
+March 2026. release-plz compared this workspace's 0.1.0 against that 0.3.2,
+concluded there was nothing to release, and exited **successfully** on every
+push to master for the life of this repository. No tag, no release, no
+version-bump pull request, and no error anywhere.
+
+`git_only = true` in `release-plz.toml` is the fix: versions come from git tags
+matching `git_tag_name`, and with no such tag present the package is an initial
+release.
+
+Two consequences that outlive the fix:
+
+- **`cargo install vibe-check` will never be a supported path**, and publishing
+  under that name is not available. Whatever #6 decides about crates.io, it
+  decides it about a *different* name. The distribution paths that remain are
+  the ones this document describes — the action, and a released binary via
+  `cargo binstall` or `mise use ubi:getkono/vibe-check`.
+- **A green release job is not evidence that anything was released.** The one
+  observable that means it is `gh release list` being non-empty, which is why
+  the verification plan checks that rather than the job's conclusion.
+
 ## If master becomes protected
 
 The promotion job pushes `dist/` to master with `secrets.GITHUB_TOKEN`, which
