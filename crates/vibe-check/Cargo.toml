@@ -10,7 +10,26 @@ authors.workspace      = true
 readme.workspace       = true
 keywords.workspace     = true
 categories.workspace   = true
-publish     = false
+# `true` here does NOT mean this crate gets published, and it is the only crate
+# in the workspace that says so. release-plz filters the release set on cargo's
+# own notion of publishability *before* any of its own configuration applies —
+# the trace reads `package vibe-check is publishable: false` — so a workspace
+# where every crate is `publish = false` has nothing release-plz will ever tag,
+# and it reports "nothing to release" and exits 0. That was the state of this
+# repository for its whole life.
+#
+# What actually withholds the registry push is `release-plz.toml`: `publish =
+# false` there means release-plz never runs `cargo publish`, and `git_only =
+# true` means it reads versions from git tags rather than asking crates.io — a
+# question it must not ask, because the name `vibe-check` there belongs to an
+# unrelated crate at a higher version. See docs/releasing.md.
+#
+# The residual sharp edge, stated rather than hidden: a human typing `cargo
+# publish` in this directory is no longer refused by cargo. It would fail on the
+# taken name instead, which is a worse error message than the one it replaces.
+# #98 owns choosing a publishable name, and closing that reverts this to a
+# deliberate `false`.
+publish     = true
 
 # Two binaries over one library. `cargo-vibe-check` exists so that
 # `cargo vibe-check` works: cargo invokes `cargo-<name>` and passes the
