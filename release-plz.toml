@@ -55,6 +55,22 @@
 
 [workspace]
 publish            = false
+# Determine the current version from git tags, NOT from crates.io.
+#
+# This is load-bearing, and its absence was silent. `publish = false` only skips
+# `cargo publish`; release-plz still asked the registry what the latest release
+# of `vibe-check` was. That name belongs to an unrelated crate, published at
+# 0.3.2 — so release-plz compared our 0.1.0 against 0.3.2, concluded there was
+# nothing to release, and exited **successfully** on every push to master since
+# this repository existed. No tag, no release, no version-bump pull request, and
+# no error to notice.
+#
+# Everything downstream inherits that: with no release there is no
+# `release-dispatch` artifact, so `Release binaries` correctly builds nothing,
+# and the whole distribution chain is inert while every job reports green.
+#
+# `git_only` and `publish` may not both be true; `publish` is false above.
+git_only           = true
 # The single-package template, chosen rather than inherited — the inherited one
 # is per-package, for the reason above.
 # Two namespaces, deliberately disjoint.
