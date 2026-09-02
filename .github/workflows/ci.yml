@@ -63,3 +63,35 @@ jobs:
         env:
           BASE_REF: ${{ github.event.pull_request.base.ref }}
         run: convco check "origin/$BASE_REF..HEAD"
+
+  # S5b: prove the digest comparison is not inert.
+  #
+  # `dist/SHA256SUMS` on THIS BRANCH has one hex character of the linux-musl
+  # entry changed, and the action is resolved at this branch so that it reads
+  # that file. The job passes when the download is REFUSED.
+  #
+  # This branch is a test fixture and must never merge. A digest check that is
+  # present but never exercised is the ordinary way these turn out to be
+  # worthless, and no positive test can detect it.
+  tamper:
+    name: A tampered digest is refused
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - id: vibe
+        continue-on-error: true
+        uses: getkono/vibe-check@test/tamper-the-committed-digest
+      - name: The mismatch must be what failed
+        run: |
+          set -euo pipefail
+          if [ "${{ steps.vibe.outcome }}" != "failure" ]; then
+            echo "::error::the action succeeded against a tampered digest"
+            exit 1
+          fi
+          echo "refused, as it must be"
