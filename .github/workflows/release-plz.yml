@@ -30,6 +30,10 @@ jobs:
     concurrency:
       group: release-plz-release-${{ github.ref }}
       cancel-in-progress: false
+    # Read across the workflow_run boundary by release-binaries.yml, which is
+    # handed the triggering *run* and nothing about what that run did.
+    outputs:
+      released: ${{ steps.release-plz.outputs.releases_created }}
     steps:
       # A release created by the default GITHUB_TOKEN does NOT trigger other
       # workflows, so the binary-build workflow would never fire. A GitHub App
@@ -54,11 +58,55 @@ jobs:
       - name: Install Rust toolchain
         run: rustup show
       - name: Run release-plz
+        id: release-plz
         uses: release-plz/action@v0.5
         with:
           command: release
         env:
           GITHUB_TOKEN: ${{ steps.app-token.outputs.token || secrets.GITHUB_TOKEN }}
+
+      # `workflow_run` gives the triggered workflow a run id, a head sha and a
+      # conclusion. It does not give it a tag, a release, or these job outputs,
+      # and a conclusion of `success` says the run worked rather than that it
+      # released anything — which on almost every push to master it did not.
+      #
+      # The tag is computed by release-plz from the bumped version, so this run
+      # is the only place it is knowable. Recording it as an artifact is how it
+      # crosses the boundary, and the artifact's ABSENCE is the signal that
+      # nothing was released. That is a fact rather than a heuristic, which is
+      # why it is preferred to reading the version out of Cargo.toml at the head
+      # commit: that would resolve a tag on every push and then fail late, or
+      # worse, succeed against a stale release.
+      - name: Record what was released
+        if: steps.release-plz.outputs.releases_created == 'true'
+        env:
+          RELEASES: ${{ steps.release-plz.outputs.releases }}
+        run: |
+          set -euo pipefail
+          mkdir -p release-dispatch
+          # Exactly one package tags and releases (release-plz.toml), so element
+          # zero is the whole story. Asserted rather than assumed: if a second
+          # package is ever release-enabled this must fail here, not silently
+          # publish binaries for one of two tags.
+          count="$(printf '%s' "$RELEASES" | jq 'length')"
+          if [ "$count" != "1" ]; then
+            echo "::error::release-plz reported ${count} releases; release-plz.toml enables exactly one"
+            printf '%s\n' "$RELEASES"
+            exit 1
+          fi
+          printf '%s' "$RELEASES" \
+            | jq --arg sha "$GITHUB_SHA" '{tag: .[0].tag, version: .[0].version, sha: $sha}' \
+            > release-dispatch/release.json
+          cat release-dispatch/release.json
+
+      - name: Hand the release over to the binary build
+        if: steps.release-plz.outputs.releases_created == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-dispatch
+          path: release-dispatch/release.json
+          if-no-files-found: error
+          retention-days: 1
 
   # Create a PR with the new versions and changelog, preparing the next release.
   release-plz-pr:

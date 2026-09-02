@@ -2,6 +2,10 @@
 hk = "1.53.0"
 "cargo:convco" = "0.7.1"
 actionlint = "1.7.7"
+# Lints dist/*.sh, which actionlint structurally cannot see: it reads workflow
+# files only, and the action's logic lives in shell so that it is lintable at
+# all.
+shellcheck = "0.11.0"
 
 [tasks.format]
 description = "Format Rust sources"
@@ -24,7 +28,25 @@ description = "Lint GitHub Actions workflows"
 # `act` is not reliable enough to gate on, so the workflows are linted
 # statically instead. The contract with Actions that we *do* test dynamically is
 # the generated matrix JSON, which is snapshot-tested from `vibe-check plan`.
-run = "actionlint"
+run = [
+  # actionlint reads workflow files only. It has no mode for composite action
+  # metadata and rejects action.yml outright as a malformed workflow, so the
+  # action's own guarantees come from the two commands after it.
+  "actionlint",
+  "shellcheck --shell=bash dist/*.sh",
+  { task = "lint-action-surface" },
+]
+
+[tasks.lint-action-surface]
+description = "Assert the action's frozen input surface and dist/ self-consistency"
+# Three claims action.yml and release-binaries.yml make in prose:
+#   1. `inputs:` is exactly config-file and config-inline. A third is a v2.
+#   2. release-binaries.yml's `workflows:` still matches release-plz.yml's
+#      `name:` — renaming that workflow otherwise silently disables the whole
+#      binary chain, with no error anywhere.
+#   3. dist/RELEASE and dist/SHA256SUMS agree, when they exist at all. They do
+#      not until the first promotion, and the gate has to pass in between.
+run = "bash dist/lint-surface.sh"
 
 [tasks.test]
 description = "Run all Rust tests"

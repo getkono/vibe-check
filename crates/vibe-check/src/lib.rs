@@ -53,6 +53,13 @@ pub async fn run(cli: Cli) -> Result<u8> {
     // one would. Inert unless `VIBE_CHECK_PANIC` is set; see [`panic`].
     panic::panic_if_requested();
 
+    // Before anything reads the repository. `dist/guard.sh` refuses this too,
+    // and earlier — but the action is not the only caller: the reusable
+    // workflow invokes the binary directly, and so does anyone running it by
+    // hand. A refusal that lives only in the wrapper is a refusal the next
+    // entry point does not have.
+    refuse_pull_request_target(&ProcessEnv)?;
+
     let registrations = assembly::builtin();
     tracing::debug!(
         command = cli.command.name(),
@@ -70,6 +77,55 @@ pub async fn run(cli: Cli) -> Result<u8> {
         | Command::Escape { .. }
         | Command::Schema { .. } => Err(not_yet_implemented(cli.command.name())),
     }
+}
+
+/// Where the process environment is read.
+///
+/// A trait rather than a direct `std::env::var` call so the refusal below is
+/// testable without mutating the environment of a parallel test runner, which
+/// `std::env::set_var` does and which is why it is `unsafe` in edition 2024.
+pub trait Env {
+    /// The value of `name`, if it is set.
+    fn var(&self, name: &str) -> Option<String>;
+}
+
+/// The real environment.
+pub struct ProcessEnv;
+
+impl Env for ProcessEnv {
+    fn var(&self, name: &str) -> Option<String> {
+        std::env::var(name).ok()
+    }
+}
+
+/// Refuse to run under `pull_request_target`.
+///
+/// That trigger checks out the base branch but runs with a **write** token and
+/// access to repository secrets, while evaluating a fork's code — and
+/// vibe-check reads the head tree. The `ForgeRead`/`ForgeWrite` split is
+/// unenforceable in that position: withholding a capability means nothing when
+/// the workflow around it holds one.
+///
+/// There is deliberately **no escape hatch** — no flag, no environment
+/// variable, no policy key. An escape hatch on this is the vulnerability rather
+/// than a convenience, and a configurable refusal is one a repository turns off
+/// the first time it is inconvenient.
+///
+/// # Errors
+/// Returns an error naming the trigger when `GITHUB_EVENT_NAME` is
+/// `pull_request_target`.
+fn refuse_pull_request_target(env: &dyn Env) -> Result<()> {
+    let event = env.var("GITHUB_EVENT_NAME");
+    if event.as_deref() == Some("pull_request_target") {
+        return Err(eyre::eyre!(
+            "vibe-check refuses to run on `pull_request_target`.\n\
+             That trigger grants a write token and repository secrets to a \
+             workflow evaluating fork-authored code, which makes the \
+             ForgeRead/ForgeWrite split unenforceable. Use `on: pull_request`.\n\
+             There is no option that permits this."
+        ));
+    }
+    Ok(())
 }
 
 /// An error that says which milestone a command is waiting on.
@@ -111,6 +167,51 @@ mod tests {
             let result = run(cli).await;
             assert!(result.is_err(), "{args:?} must not report success");
         }
+    }
+
+    /// An environment with exactly the variables a test names.
+    struct FakeEnv<'a>(&'a [(&'a str, &'a str)]);
+
+    impl Env for FakeEnv<'_> {
+        fn var(&self, name: &str) -> Option<String> {
+            self.0
+                .iter()
+                .find(|(key, _)| *key == name)
+                .map(|(_, value)| (*value).to_owned())
+        }
+    }
+
+    #[test]
+    fn pull_request_target_is_refused_by_name() {
+        let error =
+            refuse_pull_request_target(&FakeEnv(&[("GITHUB_EVENT_NAME", "pull_request_target")]))
+                .expect_err("the trigger is refused");
+        let message = error.to_string();
+        assert!(
+            message.contains("pull_request_target"),
+            "names the trigger: {message}"
+        );
+        assert!(
+            message.contains("no option that permits this"),
+            "says there is no escape hatch, because there is not: {message}"
+        );
+    }
+
+    #[test]
+    fn every_other_trigger_is_allowed() {
+        // The floor. A refusal that fired on everything would satisfy the test
+        // above and stop the tool working, so the accepting cases are asserted
+        // alongside — `pull_request` especially, which is the one the error
+        // message tells people to use.
+        for event in ["pull_request", "push", "merge_group", "schedule", ""] {
+            let bindings = [("GITHUB_EVENT_NAME", event)];
+            let allowed = refuse_pull_request_target(&FakeEnv(&bindings)).is_ok();
+            assert!(allowed, "`{event}` must be allowed");
+        }
+        assert!(
+            refuse_pull_request_target(&FakeEnv(&[])).is_ok(),
+            "an unset GITHUB_EVENT_NAME is the local case and must be allowed"
+        );
     }
 
     #[tokio::test]

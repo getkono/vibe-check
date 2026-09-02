@@ -175,6 +175,16 @@ The quality gate is `mise run check` — formatting, clippy, `actionlint`, and t
 test suite, in that order. CI runs the same task rather than respelling the
 cargo invocations.
 
+## Versioning
+
+`@v1` is a moving tag; `@v1.2.3` is immutable. See
+[`docs/releasing.md`](docs/releasing.md) for what moves it and what refuses to —
+in particular that it never moves onto a release whose binaries are missing, and
+never onto a prerelease.
+
+Before 1.0 the alias is `@v0` and carries no compatibility promise. Pin the
+immutable tag.
+
 ## Documentation
 
 `README.md` and `AGENTS.md` deliberately do not overlap. This file owns the
