@@ -160,11 +160,23 @@ already written in anticipation of this choice.
 
 **Cost taken on:** the `merge_group` trigger in `ci.yml` has to exist before
 the queue is turned on, or the queue accepts entries but never drains them
-(#11). Only the `Quality` job may be a required check for the queue — the
+(#11): a workflow with no `merge_group` trigger never runs for the queue's
+synthetic ref, so a check required there is never posted, and an entry
+waiting on a status that is not coming waits forever. That is the hazard
+this trigger closes, and it is the only one of the two that stalls anything.
+A job that is triggered and then skipped by its own `if:` is the opposite —
+GitHub still posts the check run and reports it as a success, and a skipped
+job does not block a pull request even when it is required. So the
 `Conventional commits` job's `if: github.event_name == 'pull_request'` is
 deliberate, because `github.event.pull_request.base.ref` does not exist
-under `merge_group`; marking that job required would hang every queue entry
-forever. This composes with #62 (any required check on `master` starts
+under `merge_group`, but marking that job required would not hang a queue
+entry; it would pass every one of them green while enforcing nothing. Keep
+`Quality` as the only required check — not because the alternative stalls
+the queue, but because it would be enforcement in name only. Wanting commit
+messages enforced in the queue lane means building a check that is genuinely
+`merge_group`-aware, resolving the commit range some other way when there is
+no base ref to read; that resolution is #11's own unbuilt ladder work, not a
+toggle. This composes with #62 (any required check on `master` starts
 failing the promote job's direct `dist/` push, above) and #102 (that push's
 commit already carries zero check runs, independent of this decision, and
 matters more once `master` is protected).
