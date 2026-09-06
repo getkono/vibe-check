@@ -386,6 +386,13 @@ jobs:
           } > dist/RELEASE
           cp incoming/SHA256SUMS dist/SHA256SUMS
 
+          # The same three assertions `mise run lint-action-surface` makes
+          # locally and in ci.yml's `quality` job on every other commit — run
+          # here because this is the one commit those never see. Self-check,
+          # not independent CI (see docs/releasing.md); it still stops the
+          # push if the digests this job just wrote disagree with each other.
+          bash dist/lint-surface.sh
+
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add dist/RELEASE dist/SHA256SUMS

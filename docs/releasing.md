@@ -174,6 +174,50 @@ protection on `master` requiring the `Quality` check, "Require merge queue"
 enabled, and "Require branches to be up to date before merging" left off
 (the queue already guarantees that). Tracked as #93.
 
+## The `dist/` commit carries no CI check
+
+The promotion job pushes `chore(dist): pin the action to <tag>` with the
+default `GITHUB_TOKEN` (job permission `contents: write`, no PAT). GitHub's
+loop-prevention rule for `GITHUB_TOKEN` — the same rule that stops this push
+from re-entering Release-plz — also means the push fires no `push` event, so
+ci.yml's `quality` job never runs against it. That commit therefore reaches
+`master` with zero check runs, permanently: nothing will ever retroactively
+check it, because nothing fires for it to check.
+
+**Decision: accepted, with a same-job self-check, not independent CI.** The
+"Commit the digests" step runs `dist/lint-surface.sh` against the files it
+just wrote, before `git add` — the identical script `mise run
+lint-action-surface` runs locally and in `ci.yml`'s `quality` job on every
+other commit. A promote run that would write a `dist/RELEASE` /
+`dist/SHA256SUMS` pair disagreeing with each other, or with `action.yml`'s
+frozen input surface, fails before anything is committed, let alone pushed.
+This is the promote job checking its own work, not verification by something
+that did not write it — accepted rather than deferred, for three reasons:
+
+- the commit touches only `dist/RELEASE` and `dist/SHA256SUMS`, never Rust
+  source, so `cargo fmt`/`clippy`/`test` — the checks `lint-surface.sh` cannot
+  itself perform — have nothing to say about it that they do not already say
+  about every other commit that changed no `.rs` file;
+- the values being written were already verified one step earlier, in "Verify
+  what GitHub actually serves," by re-downloading every archive anonymously
+  and checking it against the digests computed on the build runners — the
+  self-check's job is narrower: confirm the promote job did not then
+  mistranscribe those already-verified values, not re-verify the binaries;
+- it is the same script, not a reimplementation, so there is no second copy
+  of the assertions to drift from the one `mise run check` exercises
+  everywhere else.
+
+**Interaction with required checks (#62, #93):** if `master` ever requires a
+status check to pass — via branch protection or a ruleset — this commit is
+the one commit that can never acquire one, because nothing fires for it.
+Whether that wedges the push (as opposed to the existing "protected branch"
+fallback above, which is written for the push itself being rejected) depends
+on how #62/#93 implement the requirement, which is not decided yet. That
+interaction is left unresolved here on purpose: solving it now would mean
+guessing at a mechanism neither issue has settled. Whoever lands required
+checks on `master` must re-read this section and the fallback above together
+before doing so.
+
 ## What the digest does and does not protect against
 
 Worth stating, because a verification step that is believed to do more than it
