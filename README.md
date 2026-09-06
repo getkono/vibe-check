@@ -63,7 +63,7 @@ concept worth holding.
 | --- | --- | --- |
 | **adopt** | An artifact your CI already produced answered the question. | Nothing, if the answer was yes. |
 | **run** | vibe-check ran a tool to answer the question. | Nothing, if the answer was yes. |
-| **skip** | The question does not apply. | Nothing when the engine derived that — the change simply does not raise the question. `T1` when a human waived it in policy, because a change riding on a human's waiver is precisely the one that should not merge unattended. |
+| **skip** | The question does not apply. | Nothing when the engine derived that — the change simply does not raise the question. `T1` when a human waived it in policy, because a change riding on a human's waiver is precisely the one that should not merge unattended. The top tier, with reason `expired-skip`, once the date on that waiver has passed — a human wrote down when their authorisation ran out, and it has. The waiver is live through the whole of the day it names, and the date it is compared against is the head commit's committer date, never the wall clock. |
 | **unverified** | The question could not be answered. | Escalates to the top tier — of the enforcing ledger, unless the requirement was declared advisory. |
 
 ### The one way an unanswered question does not reach the verdict
