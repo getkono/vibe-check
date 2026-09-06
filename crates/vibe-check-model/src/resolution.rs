@@ -147,9 +147,9 @@ pub enum SkipReason {
         /// When it lapses.
         ///
         /// `CapabilityResolution::account` compares this against the
-        /// [`DecisionTime`](crate::time::DecisionTime)'s UTC civil date — the
-        /// head commit's committer date, never the wall clock, so that
-        /// re-running an old pull request gives the same verdict it had.
+        /// [`DecisionTime`]'s UTC civil date — the head commit's committer
+        /// date, never the wall clock, so that re-running an old pull request
+        /// gives the same verdict it had.
         ///
         /// The waiver is **live through the whole of this day**: it is expired
         /// only when the decision date is strictly greater. That sense is
@@ -1232,6 +1232,49 @@ mod tests {
             ReasonCode::ExpiredSkip,
             "and the day after, it is not"
         );
+    }
+
+    #[test]
+    fn an_expired_waiver_is_still_a_result_and_not_a_policy_fact() {
+        // Expiry raises the tier; it does not change the lane. An expired
+        // waiver is a fact about *this change* — a capability nobody answered
+        // and nobody is authorised to leave unanswered — not a fact about the
+        // policy document, so `enforcement = "advisory"` still routes it to the
+        // advisory ledger and the enforced tier does not move.
+        //
+        // The alternative was to route it like policy integrity, on the
+        // argument that a lapsed date is a defect in the policy. It was
+        // rejected: `is_policy_integrity` is for requirements this build cannot
+        // evaluate at all, and widening it to cover a waiver the policy author
+        // dated correctly and then let run out would make `advisory` mean
+        // something different for one skip variant than for every other
+        // resolution. This test is what a later "hardening" of
+        // `is_policy_integrity` — splitting its `Skipped` arm — would have to
+        // break in order to land.
+        let declared = waiver(Date::constant(2027, 1, 1));
+        let expired = decision_at(2027, 6, 1);
+
+        let (enforced, advisory) = tiers_of_at(&declared, Enforcement::Advisory, expired);
+        assert_eq!(
+            enforced,
+            Tier::BOTTOM,
+            "an advisory requirement cannot move the enforced tier, expired or not"
+        );
+        assert_eq!(advisory, Tier::TOP, "and the advisory ledger records it");
+
+        // The reason code travels with it, so the advisory ledger says *why*
+        // rather than only that something happened.
+        let mut adjudicators = Adjudicators::new();
+        declared.account(
+            &requirement(),
+            Enforcement::Advisory,
+            expired,
+            &mut adjudicators,
+        );
+        let escalations = adjudicators.finish().1.into_escalations();
+        assert_eq!(escalations.len(), 1);
+        assert_eq!(escalations[0].reason, ReasonCode::ExpiredSkip);
+        assert_eq!(escalations[0].to, Tier::TOP);
     }
 
     #[test]
