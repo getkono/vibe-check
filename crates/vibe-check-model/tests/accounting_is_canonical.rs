@@ -36,9 +36,24 @@
 
 use proptest::prelude::*;
 use vibe_check_model::{
-    Adjudicators, CapabilityResolution, Confidence, Enforcement, Escalation, EvidenceRef,
-    RequirementId, ResolutionState, Resolutions, Tier, UnverifiedReason,
+    Adjudicators, CapabilityResolution, Confidence, DecisionTime, Enforcement, Escalation,
+    EvidenceRef, RequirementId, ResolutionState, Resolutions, Tier, UnverifiedReason,
 };
+
+/// The decision time every `account_into` call here is made at.
+///
+/// `account_into` takes one because waiver expiry is decided against the head
+/// commit's committer date. Every fixture in this file resolves `Unverified`,
+/// which reads no date at all, so the value is arbitrary and the assertions
+/// below are indifferent to it — it is threaded through only because there is
+/// no way to account anything without naming when.
+fn decision_time() -> DecisionTime {
+    DecisionTime::from_committer_date(
+        "2026-06-01T00:00:00Z"
+            .parse()
+            .expect("a well-formed fixture timestamp"),
+    )
+}
 
 /// A shape-valid requirement identifier from a readable name.
 ///
@@ -103,7 +118,7 @@ fn account(order: &[RequirementId]) -> (Vec<Escalation>, Vec<Escalation>) {
     }
 
     let mut adjudicators = Adjudicators::new();
-    resolutions.account_into(&mut adjudicators);
+    resolutions.account_into(decision_time(), &mut adjudicators);
     let (enforced, advisory) = adjudicators.finish();
     (
         enforced.into_adjudication().escalations,
@@ -220,7 +235,7 @@ fn the_ledger_serializes() {
     );
     assert!(displaced.is_none(), "the fixture uses distinct identifiers");
     let mut adjudicators = Adjudicators::new();
-    resolutions.account_into(&mut adjudicators);
+    resolutions.account_into(decision_time(), &mut adjudicators);
     let ledger = adjudicators.finish().0.into_adjudication().escalations;
     assert_eq!(ledger.len(), 1);
 
@@ -283,7 +298,7 @@ fn both_ledgers_are_ordered() {
     assert!(displaced.is_none(), "the fixture uses distinct identifiers");
 
     let mut adjudicators = Adjudicators::new();
-    resolutions.account_into(&mut adjudicators);
+    resolutions.account_into(decision_time(), &mut adjudicators);
     let (enforced, advisory) = adjudicators.finish();
     let enforced = enforced.into_adjudication();
 
@@ -369,7 +384,7 @@ fn the_tally_and_the_ledger_read_the_same_map() {
     );
 
     let mut adjudicators = Adjudicators::new();
-    resolutions.account_into(&mut adjudicators);
+    resolutions.account_into(decision_time(), &mut adjudicators);
     let (enforced, advisory) = adjudicators.finish();
     assert_eq!(
         enforced.adjudication().escalations.len() + advisory.count(),

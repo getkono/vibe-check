@@ -55,6 +55,13 @@ pub enum ReasonCode {
     /// unattended.
     DeclaredSkip,
     /// A policy waiver has passed its expiry date.
+    ///
+    /// Constructed by `CapabilityResolution::account`, when the decision
+    /// time's UTC date is strictly past the waiver's `expires`. Distinct from
+    /// [`DeclaredSkip`](Self::DeclaredSkip) and dearer than it — a live waiver
+    /// costs `Tier::T1`, a lapsed one `Tier::TOP` — because an expired waiver
+    /// authorises nothing, and the two being indistinguishable in the ledger
+    /// is what let the expiry date go uncompared.
     ExpiredSkip,
     /// Answering a required capability would exceed the configured cost budget.
     ///
