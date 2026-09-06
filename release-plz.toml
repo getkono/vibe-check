@@ -20,10 +20,10 @@
 # `mise run check` never reads this file.
 #
 # Why one version is the right answer anyway, should the inheritance ever be
-# revisited: every crate is `publish = false`, the internal dependencies are
+# revisited: nothing here is on a registry, the internal dependencies are
 # path-only (`Cargo.toml`, `[workspace.dependencies]`), and exactly one package
-# ships anything — `vibe-check`, which produces two binaries, `vibe-check` and
-# `cargo-vibe-check`. An independent release cadence for crates nobody can
+# ships anything — `vibe-check-cli`, which produces two binaries, `vibe-check`
+# and `cargo-vibe-check`. An independent release cadence for crates nobody can
 # depend on independently buys nothing.
 #
 # Revisit alongside the crates.io decision (#6). If this workspace is ever
@@ -59,11 +59,16 @@ publish            = false
 #
 # This is load-bearing, and its absence was silent. `publish = false` only skips
 # `cargo publish`; release-plz still asked the registry what the latest release
-# of `vibe-check` was. That name belongs to an unrelated crate, published at
-# 0.3.2 — so release-plz compared our 0.1.0 against 0.3.2, concluded there was
-# nothing to release, and exited **successfully** on every push to master since
-# this repository existed. No tag, no release, no version-bump pull request, and
-# no error to notice.
+# of the package was. The package was called `vibe-check` then, and that name
+# belongs to an unrelated crate published at 0.3.2 — so release-plz compared our
+# 0.1.0 against 0.3.2, concluded there was nothing to release, and exited
+# **successfully** on every push to master since this repository existed. No
+# tag, no release, no version-bump pull request, and no error to notice.
+#
+# #98 renamed the package to `vibe-check-cli`, a name nobody else holds, so that
+# particular collision is gone. `git_only` stays regardless: an unpublished name
+# answers a registry query with "no such crate", and reading versions from the
+# tags we actually cut does not depend on the registry at all.
 #
 # Everything downstream inherits that: with no release there is no
 # `release-dispatch` artifact, so `Release binaries` correctly builds nothing,
@@ -92,7 +97,7 @@ git_release_enable = false
 # The one package that ships anything, and so the one package that tags and
 # cuts a release.
 [[package]]
-name               = "vibe-check"
+name               = "vibe-check-cli"
 git_tag_enable     = true
 git_release_enable = true
 
