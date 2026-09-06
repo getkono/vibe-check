@@ -137,9 +137,10 @@ jobs:
       - name: Assert the action failed the one way it is expected to
         env:
           OUTCOME: ${{ steps.dogfood.outcome }}
-          # The action's documented output. A composite action that failed does
-          # not reliably propagate its outputs, which is this step's every run,
-          # so fall back to the path dist/classify.sh writes.
+          # The action's documented output. Runner 2.337 does set it even
+          # though the composite failed, which is this step's every run; the
+          # fallback to the path dist/classify.sh writes is there because that
+          # is runner behaviour rather than a documented promise.
           VERDICT_FILE: ${{ steps.dogfood.outputs.verdict-file }}
         run: |
           set -euo pipefail
