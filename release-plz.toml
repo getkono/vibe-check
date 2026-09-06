@@ -91,6 +91,15 @@ git_only           = true
 # tagged. That circularity is the whole reason for the split; the long form is
 # in docs/releasing.md under "Why two tag namespaces".
 git_tag_name       = "binaries-v{{ version }}"
+# The GitHub release TITLE, pinned to the product name rather than left to
+# release-plz's default `{{ package }}-v{{ version }}`. The default templates on
+# the *package* name, so #98's rename would have moved one published string —
+# the existing release is tagged `binaries-v0.1.0` and titled
+# `vibe-check-v0.1.0` — while no tag, asset or digest moved. Nothing downstream
+# reads the title (`workflow_run` passes tag, version and sha;
+# `dist/install.sh` keys on the tag and the asset name), so pinning it costs
+# nothing and keeps the rename from moving any published string at all.
+git_release_name   = "vibe-check-v{{ version }}"
 git_tag_enable     = false
 git_release_enable = false
 

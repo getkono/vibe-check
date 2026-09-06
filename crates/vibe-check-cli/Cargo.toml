@@ -11,27 +11,33 @@ readme.workspace       = true
 keywords.workspace     = true
 categories.workspace   = true
 # `true`, and the only crate in the workspace that says so. release-plz filters
-# the release set on cargo's own notion of publishability *before* any of its own
-# configuration applies — the trace reads `package … is publishable: false` — so a
-# workspace where every crate is `publish = false` has nothing release-plz will
-# ever tag, and it reports "nothing to release" and exits 0. That was the state of
-# this repository for its whole life. Bisected against release-plz 0.3.160 in #99;
-# `git_only` does not substitute for it.
+# the release set on cargo's own notion of publishability *before* any of its
+# own configuration applies — the trace reads `package … is publishable: false`
+# — so a workspace where every crate is `publish = false` has nothing
+# release-plz will ever tag, and it reports "nothing to release" and exits 0.
+# That was the state of this repository for its whole life. Bisected against
+# release-plz 0.3.160 in #99; `git_only` does not substitute for it.
 #
 # Nothing is actually pushed to a registry: `release-plz.toml` sets `publish =
-# false`, so release-plz never runs `cargo publish`, and `git_only = true` keeps it
-# from asking crates.io anything. Whether this crate is ever published is #6's
-# question, not this line's.
+# false`, so release-plz never runs `cargo publish`, and `git_only = true` keeps
+# it from asking crates.io anything. Whether this crate is ever published is
+# #6's question, not this line's.
 #
-# The name is ours, which is what #98 bought. `vibe-check` on crates.io is an
-# unrelated project at 0.3.2; typing `cargo publish` here once failed on somebody
-# else's name, which was a worse error than the one it replaced. It no longer does.
+# The name is ours, which is what #98 bought — `vibe-check` on crates.io is an
+# unrelated project at 0.3.2. The taken name was never what stopped a publish,
+# though, and the rename did not unblock one. `[workspace.dependencies]` names
+# the internal crates by path with no `version =`, so cargo refuses while
+# *packaging*, before it contacts any registry: `cargo package -p
+# vibe-check-cli` fails with "all dependencies must have a version requirement
+# specified when packaging; dependency `vibe-check-diff` does not specify a
+# version", both before this rename and after it. That is why `publish = true`
+# carries no live publishing hazard.
 publish     = true
 
-# The library target keeps its own name so that renaming the package (#98) did not
-# ripple into `use vibe_check::…` at two call sites. Three names, deliberately: the
-# package is what a registry would call this, `vibe_check` is what the binaries
-# import, and the two `[[bin]]` names are what a user types.
+# The library target keeps its own name so that renaming the package (#98) did
+# not ripple into `use vibe_check::…` at two call sites. Three names,
+# deliberately: the package is what a registry would call this, `vibe_check` is
+# what the binaries import, and the two `[[bin]]` names are what a user types.
 [lib]
 name = "vibe_check"
 path = "src/lib.rs"
