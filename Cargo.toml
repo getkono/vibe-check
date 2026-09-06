@@ -24,12 +24,16 @@ members  = ["crates/*"]
 [workspace.package]
 version      = "0.1.0"
 edition      = "2024"
-# Edition 2024 needs 1.85, but the `karet-*` dependencies raise the real floor.
-# This number is UNVERIFIED: nothing builds at 1.92, and `rust-toolchain.toml`
-# pins 1.97.1, so the two disagree and no gate notices. Making it true is a
-# maintainer's choice between two different costs — drop the claim to match the
-# pin, or add a CI job that builds at the stated floor — and is unfiled.
-rust-version = "1.92"
+# Edition 2024 needs 1.85, but the `karet-*` dependencies raise the real floor
+# by an amount nobody has measured. Rather than assert a number nothing tests,
+# this pins to the exact toolchain `rust-toolchain.toml` names: the only
+# version this workspace is ever built, linted, or gated with. That is the
+# "drop the claim to match the pin" branch of #94 — free and honest, at the
+# cost of narrowing the promise to exactly what CI exercises rather than
+# whatever the true, lower, unmeasured floor might actually be. Widening it
+# again needs a CI job that builds at the claimed number before that number
+# can be trusted; nothing does that today.
+rust-version = "1.97.1"
 license      = "MIT"
 repository   = "https://github.com/getkono/vibe-check"
 homepage     = "https://github.com/getkono/vibe-check"
