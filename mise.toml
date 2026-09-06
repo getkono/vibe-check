@@ -1,7 +1,10 @@
 [tools]
 hk = "1.53.0"
 "cargo:convco" = "0.7.1"
-"cargo:cargo-deny" = "0.20.2"
+# Prebuilt, not `cargo:`. Installing it from source put a two-minute compile on
+# the critical path of every CI job, and two concurrent `cargo install` runs
+# raced each other's rustup component download and failed a required check.
+"aqua:EmbarkStudios/cargo-deny" = "0.20.2"
 actionlint = "1.7.7"
 # Lints dist/*.sh, which actionlint structurally cannot see: it reads workflow
 # files only, and the action's logic lives in shell so that it is lintable at
