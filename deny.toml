@@ -34,4 +34,5 @@ deny = [
     { crate = "ratatui-termina", reason = "a ratatui 0.30 sibling published from the ratatui/ratatui workspace (the termina terminal backend); same reasoning as ratatui-core" },
     { crate = "ratatui-termion", reason = "a ratatui 0.30 sibling published from the ratatui/ratatui workspace (the termion terminal backend); same reasoning as ratatui-core" },
     { crate = "ratatui-termwiz", reason = "a ratatui 0.30 sibling published from the ratatui/ratatui workspace (the termwiz terminal backend); same reasoning as ratatui-core" },
+    { crate = "ratatui-layout", reason = "a ratatui sibling published from the ratatui/ratatui workspace; a workspace member rather than a default member, which is why the first pass over `default-members` missed it — the same way the next one will be missed" },
 ]
