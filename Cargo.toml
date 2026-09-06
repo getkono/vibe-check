@@ -40,10 +40,10 @@ categories   = ["development-tools", "command-line-utilities"]
 
 [workspace.dependencies]
 # --- internal ---------------------------------------------------------------
-# Path-only while the crates.io question stays deferred, not unaddressed
-# (#6). `vibe-check`'s own `publish = true` is a separate, release-plz-specific
-# workaround and does not answer this question either way — see the comment on
-# `publish` in `crates/vibe-check/Cargo.toml`.
+# Path-only while the crates.io question stays deferred, not unaddressed (#6).
+# The workspace's one publishable crate's own `publish = true` is a separate,
+# release-plz-specific workaround and does not answer this question either way
+# — see the comment on `publish` in that crate's manifest.
 #
 # M1 has since shipped `action.yml` and the binary release chain, so
 # distribution no longer needs a registry at all, and what crates.io would
