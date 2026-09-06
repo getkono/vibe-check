@@ -153,12 +153,13 @@ $ echo $?
 
 Installation is the Action or a released binary. `uses: getkono/vibe-check@v0`
 downloads a binary pinned by digest at the ref you used; `mise use
-ubi:getkono/vibe-check` or `cargo binstall` fetch the same archives from the
-GitHub release. There is nothing on crates.io: the name `vibe-check` there
-belongs to an unrelated project, so this workspace's binary crate is
-`vibe-check-cli` and publishing it is deferred to #6. `cargo install
-vibe-check` installs somebody else's tool. Building from source works too, and
-what you get for your trouble is a program that exits `1`.
+ubi:getkono/vibe-check` fetches the same archives from the GitHub release.
+There is nothing on crates.io: the name `vibe-check` there belongs to an
+unrelated project, so this workspace's binary crate is `vibe-check-cli` and
+publishing it is deferred to #6. `cargo install vibe-check` installs somebody
+else's tool, and `cargo binstall` is not a path here because it resolves
+through crates.io as well. Building from source works too, and what you get for
+your trouble is a program that exits `1`.
 
 ## Building it
 

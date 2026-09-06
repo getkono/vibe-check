@@ -124,9 +124,11 @@ Two consequences that outlive the fix:
   `vibe-check-cli`; whether it is ever pushed to crates.io under that name is
   #6's question, and `release-plz.toml` keeps `publish = false` until #6 answers
   it. The distribution paths that exist today are the ones this document
-  describes — the action, and a released binary via `cargo binstall` or
-  `mise use ubi:getkono/vibe-check`. The two `[[bin]]` names are unchanged by
-  the rename: a user still types `vibe-check` and `cargo vibe-check`.
+  describes — the action, and a released binary via
+  `mise use ubi:getkono/vibe-check`. `cargo binstall` is not one of them: it
+  resolves through crates.io as well, so it stays unavailable until #6. The two
+  `[[bin]]` names are unchanged by the rename: a user still types `vibe-check`
+  and `cargo vibe-check`.
 - **A green release job is not evidence that anything was released.** The one
   observable that means it is `gh release list` being non-empty, which is why
   the verification plan checks that rather than the job's conclusion.
