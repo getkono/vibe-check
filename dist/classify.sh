@@ -32,11 +32,11 @@ cd "$GITHUB_WORKSPACE" || exit 1
 "$VIBE_CHECK_BIN" classify --format json "${args[@]}" > "$out"
 code=$?
 
-# The exit table is crates/vibe-check/src/exit.rs, and it is a public interface.
-# At this milestone `classify` decides nothing, so any non-zero is a failure of
-# the tool rather than a verdict, and the step fails. When the observe/advisory/
-# enforcing modes land, `observe` maps 10 and 20 to a passing step and only
-# 1 / 2 / 101 stay fatal — that change belongs there, not here.
+# The exit table is crates/vibe-check-cli/src/exit.rs, and it is a public
+# interface. At this milestone `classify` decides nothing, so any non-zero is a
+# failure of the tool rather than a verdict, and the step fails. When the
+# observe/advisory/enforcing modes land, `observe` maps 10 and 20 to a passing
+# step and only 1 / 2 / 101 stay fatal — that change belongs there, not here.
 case "$code" in
   0) echo "vibe-check classified the change." ;;
   10) echo "::warning::interface-review (exit 10)" ;;

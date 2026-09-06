@@ -133,7 +133,7 @@ $ vibe-check classify
       for "this change is fine".
 
 Location:
-   crates/vibe-check/src/lib.rs:81
+   crates/vibe-check-cli/src/lib.rs:137
 
 Backtrace omitted. Run with RUST_BACKTRACE=1 environment variable to display it.
 Run with RUST_BACKTRACE=full to include source snippets.
@@ -151,10 +151,13 @@ $ echo $?
 | The local scheduler, and the seam where builtins get registered. | Any registered builtin. The registry is empty. |
 | The `ForgeRead` / `ForgeWrite` port traits, and a forge that answers every read with a typed *unavailable* error. | A forge that talks to GitHub — there is no HTTP client anywhere in this workspace — and the wiring that would turn that unavailable error into an `unverified` resolution instead of a failure, so that a local run degrades to a more cautious verdict. |
 
-Consequently there is also no installation path yet. There is no `action.yml`,
-so this is not usable as a GitHub Action; every crate is `publish = false`, so
-nothing is on crates.io; and the release workflow cuts tags and GitHub releases
-but attaches no binaries. Building from source is the only way to run it, and
+Installation is the Action or a released binary. `uses: getkono/vibe-check@v0`
+downloads a binary pinned by digest at the ref you used; `mise use
+ubi:getkono/vibe-check` or `cargo binstall` fetch the same archives from the
+GitHub release. There is nothing on crates.io: the name `vibe-check` there
+belongs to an unrelated project, so this workspace's binary crate is
+`vibe-check-cli` and publishing it is deferred to #6. `cargo install
+vibe-check` installs somebody else's tool. Building from source works too, and
 what you get for your trouble is a program that exits `1`.
 
 ## Building it

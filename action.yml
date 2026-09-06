@@ -8,10 +8,10 @@ branding:
 # ---------------------------------------------------------------------------
 # THE INPUT SURFACE IS FROZEN AT THESE TWO ENTRIES.
 #
-# crates/vibe-check/src/cli.rs states the reason, and it applies twice as hard
-# here: every knob added becomes an action input, and an input list that grows
-# means every new option needs an Action release that consumers pinned to @v1
-# will never receive. Configuration belongs in the policy document, which is
+# crates/vibe-check-cli/src/cli.rs states the reason, and it applies twice as
+# hard here: every knob added becomes an action input, and an input list that
+# grows means every new option needs an Action release that consumers pinned to
+# @v1 will never receive. Configuration belongs in the policy document, which is
 # versioned, reviewable, and read from the merge base.
 #
 # Runtime concerns travel through the ENVIRONMENT instead, which is not part of

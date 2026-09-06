@@ -10,7 +10,7 @@
 #       └─ …                                (diff, evidence, policy, capability,
 #                                             risk, engine — added per milestone)
 #     ......................................... link-time only .................
-#       vibe-check                          bins + `assembly.rs` registration
+#       vibe-check-cli                      bins + `assembly.rs` registration
 #
 # `vibe-check-engine` must never gain a dependency on a concrete parser,
 # analyzer, capability, probe, forge, or renderer. The crate does not exist yet,
