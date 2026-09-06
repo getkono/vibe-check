@@ -1,0 +1,24 @@
+# vibe-check — cargo-deny bans configuration.
+#
+# Only [bans.deny] is populated. The real, exercised guarantee against these
+# packages is a test — crates/vibe-check-model/tests/
+# no_key_parser_or_tui_in_the_tree.rs — which reads Cargo.lock, bans `ratatui`
+# by *prefix* (catching ratatui-core, ratatui-widgets, ratatui-macros, and any
+# future sibling), and runs on every `mise run test`. This file names packages
+# by exact crate name only, via `cargo metadata` instead of a hand-parsed lock;
+# it is a second instrument reading a different source, not a wider one, and
+# the prefix gap is why the test remains the stronger of the two.
+#
+# advisories, licenses, and sources are deliberately absent: nothing here runs
+# `cargo deny check` against them, and `check advisories` fetches the RustSec
+# database over the network, which AGENTS.md §9 forbids in anything the `hk`
+# pre-push hook or CI runs. `cargo deny check bans` alone touches no network.
+
+[bans]
+deny = [
+    { crate = "ssh-key", reason = "parses key material; karet-vcs's default `signature` feature pulls it in, and this workspace runs untrusted pull-request code" },
+    { crate = "ratatui", reason = "a terminal UI; enabled only by the `view` feature on a karet crate, which must never be turned on in this headless process" },
+    { crate = "ratatui-core", reason = "a ratatui 0.30 sibling; a crate can depend on it directly, so banning only the facade would let the terminal UI in through the side door" },
+    { crate = "ratatui-widgets", reason = "a ratatui 0.30 sibling; same reasoning as ratatui-core" },
+    { crate = "ratatui-macros", reason = "a ratatui 0.30 sibling; same reasoning as ratatui-core" },
+]
