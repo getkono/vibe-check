@@ -40,8 +40,24 @@ categories   = ["development-tools", "command-line-utilities"]
 
 [workspace.dependencies]
 # --- internal ---------------------------------------------------------------
-# Path-only while every crate is `publish = false`. If the workspace is ever
-# published these gain `version =` pins; see the publish decision in the plan.
+# Path-only while the crates.io question stays deferred, not unaddressed
+# (#6). `vibe-check`'s own `publish = true` is a separate, release-plz-specific
+# workaround and does not answer this question either way — see the comment on
+# `publish` in `crates/vibe-check/Cargo.toml`.
+#
+# M1 has since shipped `action.yml` and the binary release chain, so
+# distribution no longer needs a registry at all, and what crates.io would
+# still buy — a `cargo install`-shaped path, under whatever name this
+# workspace ends up publishable under (#98 owns the name; this decision does
+# not) — already has a cheaper answer: `mise use ubi:getkono/vibe-check`, or
+# `cargo install --git`. Staying unpublished also keeps an option publishing
+# would close for good: publishing forbids `path` dependencies, which would
+# force these four onto released `karet` versions permanently, and the karet
+# integration may need to move faster than karet's release cadence allows. If
+# the workspace is ever published, these four gain `version =` pins in place
+# of `path =`. Revisit at M3, per #6, once the Action's need for a registry is
+# demonstrated rather than argued from prediction — which, with M1 shipped, it
+# already partly has been.
 vibe-check-model   = { path = "crates/vibe-check-model" }
 vibe-check-host    = { path = "crates/vibe-check-host" }
 vibe-check-diff    = { path = "crates/vibe-check-diff" }
