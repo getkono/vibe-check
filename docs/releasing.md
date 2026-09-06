@@ -139,6 +139,41 @@ the tagging. One manual step per release; no new credential.
 Do not reach for a PAT. A long-lived token with write access to master, held to
 avoid one click per release, is a worse trade than the click.
 
+### #93: keeping two green pull requests from merging into a red master
+
+Two pull requests can each pass CI against a stale base and still conflict
+with each other once both land — #91 was exactly this twice over: a guard's
+argument pool shared across a macro's rules, and `RequirementId::new` removed
+in one pull request while new callers of it were added in another. Neither
+GitHub check ever saw the combination that broke, because nothing required
+either branch to be current against the other before merging.
+
+**Decision: a merge queue, not "require branches up to date before
+merging."** Both close the hole completely — a queue re-validates a pull
+request against the current master before merging, exactly what "require
+up to date" forces via a manual re-run. The difference is cost: "require up
+to date" serializes every merge behind a fresh CI run, paid by whoever is
+waiting; a queue pays the same re-validation without blocking a human, which
+matters here because this repository's own tooling delivers backlog work as
+multiple parallel pull requests, and #11's `merge_group` amendment was
+already written in anticipation of this choice.
+
+**Cost taken on:** the `merge_group` trigger in `ci.yml` has to exist before
+the queue is turned on, or the queue accepts entries but never drains them
+(#11). Only the `Quality` job may be a required check for the queue — the
+`Conventional commits` job's `if: github.event_name == 'pull_request'` is
+deliberate, because `github.event.pull_request.base.ref` does not exist
+under `merge_group`; marking that job required would hang every queue entry
+forever. This composes with #62 (any required check on `master` starts
+failing the promote job's direct `dist/` push, above) and #102 (that push's
+commit already carries zero check runs, independent of this decision, and
+matters more once `master` is protected).
+
+**What remains, and cannot be done from this repository's code:** branch
+protection on `master` requiring the `Quality` check, "Require merge queue"
+enabled, and "Require branches to be up to date before merging" left off
+(the queue already guarantees that). Tracked as #93.
+
 ## What the digest does and does not protect against
 
 Worth stating, because a verification step that is believed to do more than it
