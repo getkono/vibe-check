@@ -48,7 +48,14 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: quality
+      # Pinned, not floating. `mise-action` resolves the latest version from
+      # mise.jdx.dev/VERSION, which currently advertises 2026.9.2 while that
+      # release's Linux asset 404s, so every cache-miss run fails before any
+      # repository task executes. Remove this `with:` block once the endpoint
+      # and the released assets agree again.
       - uses: jdx/mise-action@v2
+        with:
+          version: 2026.9.1
       # CI invokes the same task interface as the git hooks. Duplicating the
       # cargo invocations here is how CI and `hk` silently drift apart.
       - name: Check
@@ -65,7 +72,14 @@ jobs:
           persist-credentials: false
       # `convco` is pinned in mise.toml; installing it unpinned here would let
       # CI validate against a different version than the commit-msg hook does.
+      # Pinned, not floating. `mise-action` resolves the latest version from
+      # mise.jdx.dev/VERSION, which currently advertises 2026.9.2 while that
+      # release's Linux asset 404s, so every cache-miss run fails before any
+      # repository task executes. Remove this `with:` block once the endpoint
+      # and the released assets agree again.
       - uses: jdx/mise-action@v2
+        with:
+          version: 2026.9.1
       # `origin/$BASE_REF` is the live base branch, not the
       # `github.event.pull_request.base.sha` tip recorded when the event fired,
       # which drifts as the base branch moves. Two dots, not three: `convco
