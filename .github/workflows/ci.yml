@@ -40,6 +40,45 @@ jobs:
       - name: Check
         run: mise run check
 
+  msrv:
+    name: MSRV (1.92)
+    runs-on: ubuntu-latest
+    # `rust-version` in Cargo.toml claims a floor of 1.92. A stated MSRV that
+    # nothing exercises is a promise nobody tests — precisely the defect #94
+    # was filed about — because the number can only break for a consumer on an
+    # older toolchain, never for us on the pinned one. This job is what makes
+    # the claim falsifiable: reach for something newer than 1.92, in our own
+    # source or in a dependency's declared floor, and it fails here, on the
+    # pull request that reached, rather than in somebody else's build.
+    #
+    # `RUSTUP_TOOLCHAIN` rather than `cargo +1.92`: `rust-toolchain.toml` pins
+    # 1.97.1, and rustup honours that file over a `+toolchain` argument, so the
+    # obvious spelling would quietly build at the pin and pass without ever
+    # touching the floor. The environment variable is the one override that
+    # beats the file. Two components, matching `rust-version`, so this tracks
+    # the newest 1.92 patch rather than pinning a patch level the floor does
+    # not depend on.
+    #
+    # `cargo check`, not `mise run check`: the claim under test is that the
+    # workspace *builds* at the floor. Formatting, clippy, and test outcomes
+    # belong to the pinned toolchain in `quality`; gating them here would turn
+    # every lint the older clippy happens to disagree about into an MSRV
+    # failure. No `--ignore-rust-version` either — the dependency floors cargo
+    # enforces are half of what this job is measuring.
+    env:
+      RUSTUP_TOOLCHAIN: "1.92"
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - name: Install Rust toolchain
+        run: rustup toolchain install --profile minimal --no-self-update "$RUSTUP_TOOLCHAIN"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: msrv
+      - name: Check at the MSRV floor
+        run: cargo check --workspace --all-targets --all-features
+
   commits:
     name: Conventional commits
     if: github.event_name == 'pull_request'
