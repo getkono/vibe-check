@@ -20,8 +20,20 @@
 #
 # advisories, licenses, and sources are deliberately absent: nothing here runs
 # `cargo deny check` against them, and `check advisories` fetches the RustSec
-# database over the network, which AGENTS.md §9 forbids in anything the `hk`
-# pre-push hook or CI runs. `cargo deny check bans` alone touches no network.
+# database over the network on every run, which would make this gate fail on
+# upstream publication rather than on the diff in front of it.
+#
+# `check bans` is not itself network-free, whatever the name suggests. It builds
+# its graph from `cargo metadata` rather than reading Cargo.lock as text, so it
+# resolves the dependency graph: with a cold CARGO_HOME it downloads the index
+# and the crate files, and with CARGO_NET_OFFLINE=true it fails outright. It is
+# free only against a warm registry cache.
+#
+# That is affordable because `mise run lint-deny` runs from `mise run check`,
+# which is CI's entry point (.github/workflows/ci.yml) and nothing else's. The
+# `hk` pre-push hook calls the leaf tasks — format-check, lint, test, commits —
+# and never `check`, so pre-push stays hermetic and the network requirement is
+# confined to a runner that has one. Do not add this task to a git hook.
 
 [bans]
 deny = [

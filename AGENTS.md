@@ -310,14 +310,19 @@ what it is for.
 
 ## 9. Quality gates
 
-`mise run check` is the gate. It is exactly four tasks, in order:
+`mise run check` is the gate. It is this task list, in this order:
 
 ```bash
 mise run format-check  # cargo fmt --all --check
 mise run lint          # cargo clippy --workspace --all-targets --all-features -- -D warnings
-mise run lint-actions  # actionlint
+mise run lint-actions  # actionlint, shellcheck, and lint-action-surface
+mise run lint-deny     # cargo deny check bans
 mise run test          # cargo test --workspace --all-targets --all-features
 ```
+
+The list is the contract, not its length: `lint-actions` is itself three
+commands, so counting tasks was never the same as counting what runs. Read the
+`[tasks.check]` array in `mise.toml` for what is actually gated.
 
 CI runs `mise run check` verbatim (`.github/workflows/ci.yml:41`) rather than
 spelling the cargo invocations out again, because duplicating them is how CI and
@@ -332,8 +337,16 @@ the hooks drift apart.
 - **pre-push** — `format-check`, `lint`, `test`, then `commits`
   (`convco check origin/master..HEAD`).
 
-**`lint-actions` is CI-only.** A change to a workflow YAML file passes pre-push
-and can still fail CI. Run `mise run check` yourself before pushing one.
+**`lint-actions` and `lint-deny` are CI-only.** A change to a workflow YAML
+file, or one that moves the dependency graph, passes pre-push and can still fail
+CI. Run `mise run check` yourself before pushing one.
+
+That split is also what keeps `lint-deny` affordable. `cargo deny check bans`
+resolves the graph through `cargo metadata` rather than reading `Cargo.lock` as
+text, so it wants a warm registry cache or a network — and because pre-push
+calls the leaf tasks and never `check`, the only place that requirement lands is
+a CI runner that has both. The hermetic rule below is about the pre-push hook;
+moving `lint-deny` onto that hook is what would break it.
 
 Enforcing files: `mise.toml`, `.github/workflows/ci.yml`, `hk.pkl`.
 

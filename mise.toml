@@ -29,10 +29,22 @@ run = "cargo clippy --workspace --fix --allow-dirty --allow-staged --all-targets
 
 [tasks.lint-deny]
 description = "Assert the cargo-deny bans list against the resolved dependency graph"
-# Network-free: `check bans` reads Cargo.lock and deny.toml only. Never call
-# bare `cargo deny check` or add `check advisories` here — advisories fetches
-# the RustSec database over the network, which this workspace's hermetic-test
-# contract (AGENTS.md §9) forbids.
+# Not network-free. `check bans` builds its graph from `cargo metadata`, not by
+# reading Cargo.lock as text, so it resolves the dependency graph and needs a
+# warm registry cache or network access: against a cold CARGO_HOME it downloads
+# the index and the crate files, and under CARGO_NET_OFFLINE=true it fails
+# outright.
+#
+# That cost lands in CI only, and deliberately. `hk.pkl` never calls `check`;
+# the pre-push hook calls the leaf tasks — format-check, lint, test, commits —
+# and this task is not among them. So wiring `lint-deny` into `check` leaves
+# pre-push hermetic and offline-capable, and AGENTS.md §9's hermetic-test rule
+# is intact. Adding this task to the pre-push hook is what would break it.
+#
+# Never call bare `cargo deny check` or add `check advisories` here: advisories
+# fetches the RustSec database over the network on every run, turning a
+# cache-warm check into an unconditional fetch and making the gate fail on
+# upstream publication rather than on this workspace's own diff.
 run = "cargo deny check bans"
 
 [tasks.lint-actions]
@@ -77,10 +89,17 @@ run = "cargo insta accept --workspace"
 
 [tasks.check]
 description = "Run all read-only quality checks"
+# `lint-deny` sits with the other static checks rather than after `test`,
+# because it is one: it inspects the resolved dependency graph and never builds
+# or runs the workspace's code. Ordering here is cheapest-first among things
+# that can fail on their own terms, with the slowest task last — a banned
+# transitive crate should be reported before spending several minutes compiling
+# the test binaries that would link it.
 run = [
   { task = "format-check" },
   { task = "lint" },
   { task = "lint-actions" },
+  { task = "lint-deny" },
   { task = "test" },
 ]
 
