@@ -7,8 +7,10 @@ run, and adjudicates a verdict.
 > The command surface, the exit-code contract, the local scheduler, and the
 > registration seam are in place. Classification, policy resolution, evidence
 > parsing, and adjudication are not: every subcommand exits `1` with a message
-> naming what it is waiting on. There is no GitHub Action, no published binary,
-> and no code in this workspace that talks to a forge over the network.
+> naming what it is waiting on. The GitHub Action and the released binaries are
+> real — the tool installs and runs, and then exits `1`. What is absent is
+> anything on crates.io, and any code in this workspace that talks to a forge
+> over the network.
 >
 > Everything from here to [What exists today](#what-exists-today) describes the
 > design being built. The exit-code contract is the part of it that already
