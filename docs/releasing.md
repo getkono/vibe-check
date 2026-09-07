@@ -159,11 +159,14 @@ multiple parallel pull requests, and #11's `merge_group` amendment was
 already written in anticipation of this choice.
 
 **Cost taken on:** the `merge_group` trigger in `ci.yml` has to exist before
-the queue is turned on, or the queue accepts entries but never drains them
+the queue is turned on, or the queue accepts entries and merges none of them
 (#11): a workflow with no `merge_group` trigger never runs for the queue's
 synthetic ref, so a check required there is never posted, and an entry
-waiting on a status that is not coming waits forever. That is the hazard
-this trigger closes, and it is the only one of the two that stalls anything.
+waiting on a status that is not coming is failed out of the queue when the
+queue's configurable status-check timeout expires. Nothing merges, and the
+recorded reason is a check that was never asked to run rather than one that
+ran and failed. That is the hazard this trigger closes, and it is the only
+one of the two that blocks a merge at all.
 A job that is triggered and then skipped by its own `if:` is the opposite —
 GitHub still posts the check run and reports it as a success, and a skipped
 job does not block a pull request even when it is required. So the
