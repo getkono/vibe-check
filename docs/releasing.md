@@ -199,28 +199,69 @@ ci.yml's `quality` job never runs against it. That commit therefore reaches
 `master` with zero check runs, permanently: nothing will ever retroactively
 check it, because nothing fires for it to check.
 
-**Decision: accepted, with a same-job self-check, not independent CI.** The
-"Commit the digests" step runs `dist/lint-surface.sh` against the files it
-just wrote, before `git add` — the identical script `mise run
-lint-action-surface` runs locally and in `ci.yml`'s `quality` job on every
-other commit. A promote run that would write a `dist/RELEASE` /
-`dist/SHA256SUMS` pair disagreeing with each other, or with `action.yml`'s
-frozen input surface, fails before anything is committed, let alone pushed.
-This is the promote job checking its own work, not verification by something
-that did not write it — accepted rather than deferred, for three reasons:
+**Decision: accepted, with same-job assertions over independent inputs, not
+independent CI.** Before `git add`, the "Commit the digests" step makes three
+assertions against the files it has just written. What each can and cannot
+detect matters more than that there are three of them, so:
 
-- the commit touches only `dist/RELEASE` and `dist/SHA256SUMS`, never Rust
-  source, so `cargo fmt`/`clippy`/`test` — the checks `lint-surface.sh` cannot
-  itself perform — have nothing to say about it that they do not already say
-  about every other commit that changed no `.rs` file;
-- the values being written were already verified one step earlier, in "Verify
-  what GitHub actually serves," by re-downloading every archive anonymously
-  and checking it against the digests computed on the build runners — the
-  self-check's job is narrower: confirm the promote job did not then
-  mistranscribe those already-verified values, not re-verify the binaries;
-- it is the same script, not a reimplementation, so there is no second copy
-  of the assertions to drift from the one `mise run check` exercises
-  everywhere else.
+- `dist/lint-surface.sh` — the identical script `mise run lint-action-surface`
+  runs locally and in `ci.yml`'s `quality` job on every other commit. **In
+  this job it cannot fail.** Its first two assertions read `action.yml` and
+  `release-plz.yml`'s `name:` out of the master checkout: files this step
+  never writes, on a commit `quality` already linted. Its third compares
+  `dist/RELEASE`'s `version` against the filenames in `dist/SHA256SUMS` — and
+  both of those descend from the same `${VERSION}` expansion in the same
+  shell, so they are two copies of one variable and cannot disagree. It never
+  parses `tag`, and it discards the hash on every line of `SHA256SUMS`. Do not
+  read this call as verification of the promotion; it is a structural check
+  whose failure modes are all unreachable here, kept because it costs nothing
+  and because it is what would catch a future edit that stopped writing a
+  well-formed pair at all.
+- **`dist/RELEASE`'s `tag` field, read back through `awk`.** This is the field
+  `dist/install.sh` builds its download URL from, on a consumer's runner,
+  months later — and until now nothing in the repository read it back at all.
+  The assertion is a round trip, not a judgement: it does not know whether the
+  resolved tag is the right one (the `resolve` job decided that), it proves
+  that the bytes on disk parse back to it under the same one-line `awk`
+  program `install.sh` will use. A tag that does not survive that round trip —
+  reformatted, whitespace in it, the file's comment block reordered so a
+  different line matches first — sends every consumer to a 404 and, before
+  this, failed nothing anywhere.
+- **`dist/SHA256SUMS` against the bytes GitHub actually served.** The step
+  above, "Verify what GitHub actually serves," downloaded all five archives
+  anonymously from the public release into `verify/` and checked
+  `incoming/SHA256SUMS` against them. This assertion re-runs `sha256sum -c`
+  from inside `verify/` against `dist/SHA256SUMS` — the copy about to be
+  committed to `master` and pointed at by an immutable tag. The two files are
+  a `cp` apart, and that `cp` was the one step between "verified" and
+  "published" that nothing watched. A digest mistranscribed, truncated,
+  reordered, or written for a different release is now fatal here, rather than
+  surfacing as a failed integrity check on a consumer's runner against a tag
+  that can no longer be moved. A missing `verify/` is a hard failure, never a
+  skip: a check that evaporates when its inputs do is the same hole in a new
+  costume.
+
+Note what the third assertion buys and what it does not. It is still the
+promote job checking its own work — but it now checks the written artifact
+against an input the writing shell did not produce (bytes fetched over the
+public internet from GitHub's CDN), which is a different thing from comparing
+a variable to itself. That is accepted rather than deferred because the commit
+touches only `dist/RELEASE` and `dist/SHA256SUMS`, never Rust source, so
+`cargo fmt`/`clippy`/`test` have nothing to say about it that they do not
+already say about every other commit that changed no `.rs` file.
+
+**Honest status of #102.** Its first Done-when box — the `dist/` commit
+"verified by something that is not the job that wrote it" — is **not met, and
+is not met by this change.** The same job still runs all three assertions.
+What changed is that two of them are now *reachable* and read *independent
+inputs*, where the state before this was a call that could not fail. Meeting
+that box literally requires a checker that is not the promote job: a
+`workflow_dispatch`-triggered or scheduled job that re-derives `dist/` from
+the release it names, or a PAT-pushed commit that fires `push` and is caught
+by `quality` like any other. Both were rejected here — the first is unbuilt,
+the second reintroduces the loop the `GITHUB_TOKEN` rule prevents and puts a
+long-lived credential in a workflow that runs after a release. Whoever wants
+the box ticked owns building the first.
 
 **Interaction with required checks (#62, #93):** if `master` ever requires a
 status check to pass — via branch protection or a ruleset — this commit is
