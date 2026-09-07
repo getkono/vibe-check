@@ -60,7 +60,7 @@ categories   = ["development-tools", "command-line-utilities"]
 # beside it publishes fine and still resolves locally through the path, so
 # nothing about how this workspace builds today would have to change.
 #
-# Revisit at M3 under #111, once the Action's need for a registry is
+# Revisit at M3 under #112, once the Action's need for a registry is
 # demonstrated rather than argued from prediction.
 vibe-check-model   = { path = "crates/vibe-check-model" }
 vibe-check-host    = { path = "crates/vibe-check-host" }
