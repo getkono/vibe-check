@@ -38,14 +38,18 @@ run = [
 ]
 
 [tasks.lint-action-surface]
-description = "Assert the action's frozen input surface and dist/ self-consistency"
-# Three claims action.yml and release-binaries.yml make in prose:
+description = "Assert the action's frozen input surface and release-chain self-consistency"
+# Four claims action.yml, release-binaries.yml and release-plz.toml make in
+# prose:
 #   1. `inputs:` is exactly config-file and config-inline. A third is a v2.
 #   2. release-binaries.yml's `workflows:` still matches release-plz.yml's
 #      `name:` — renaming that workflow otherwise silently disables the whole
 #      binary chain, with no error anywhere.
 #   3. dist/RELEASE and dist/SHA256SUMS agree, when they exist at all. They do
 #      not until the first promotion, and the gate has to pass in between.
+#   4. every `[[package]]` in release-plz.toml names a package that exists.
+#      Nothing else in `mise run check` reads that file, and a stale name there
+#      is a hard release-plz error raised on master after the merge.
 run = "bash dist/lint-surface.sh"
 
 [tasks.test]

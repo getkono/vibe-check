@@ -16,8 +16,10 @@
 # crates in a group would be dead configuration: the inherited-version branch is
 # matched before the group is ever looked up, so the group would never be
 # consulted. It would not be harmless dead configuration either, because a name
-# in that list that no longer matches a crate is a hard config error, and
-# `mise run check` never reads this file.
+# in that list that no longer matches a crate is a hard config error, raised on
+# master after the merge. `dist/lint-surface.sh` checks the `[[package]]` names
+# below against the crate manifests; it does not know about `version_group`, so
+# a stale name in one would still reach release-plz unchallenged.
 #
 # Why one version is the right answer anyway, should the inheritance ever be
 # revisited: nothing here is on a registry, the internal dependencies are
@@ -104,7 +106,9 @@ git_tag_enable     = false
 git_release_enable = false
 
 # The one package that ships anything, and so the one package that tags and
-# cuts a release.
+# cuts a release. `dist/lint-surface.sh` asserts this name still matches a real
+# crate manifest, because getting it wrong breaks the release chain silently
+# until master runs release-plz.
 [[package]]
 name               = "vibe-check-cli"
 git_tag_enable     = true
