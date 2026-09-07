@@ -25,6 +25,9 @@
 //!   month's pull request still gives last month's verdict
 //! - an unknown identifier is a fact about the *policy*, not a result about the
 //!   code, and policy integrity is never advisory
+//! - a missing committer date is a fact about the *run*, and takes the same
+//!   route for the same reason: there is no decision time, so no waiver can be
+//!   dated, and "assume live" is a fail-open whichever lane it lands on
 //!
 //! Because there is one consumer, there is one place to audit. That is also why
 //! choosing between the enforced and advisory ledgers happens here rather than
@@ -252,6 +255,36 @@ pub enum UnverifiedReason {
     },
     /// Adoption needs a forge and there is none, e.g. running locally.
     NoForge,
+    /// The head commit's committer date could not be read, so there is no
+    /// [`DecisionTime`] to judge anything against.
+    ///
+    /// The third of #32's three decisions, and the one that is a property of
+    /// this type rather than a promise in prose: *if `committer_date` is
+    /// unavailable, escalate to [`Tier::TOP`]; never "assume live"*. Both of
+    /// the ways a caller might carry on regardless are fail-open. Treating
+    /// every waiver as live honours authorisations that may have lapsed years
+    /// ago. Substituting the wall clock makes a waiver live when the pull
+    /// request was opened and dead when CI re-ran it, which is the replay
+    /// property gone — and it is the substitution
+    /// [`DecisionTime`]'s missing `Default` and missing `From<Timestamp>`
+    /// exist to make awkward. This variant is what a caller reaches for
+    /// instead, and it is the reason those absences leave the caller somewhere
+    /// to go.
+    ///
+    /// [`is_policy_integrity`](Self::is_policy_integrity) is `true` for it, so
+    /// it lands on the enforced ledger whatever the requirement's lane says —
+    /// see that method for why.
+    ///
+    /// Nothing constructs one yet: the workspace has no implementation of
+    /// `vibe-check-host`'s `Vcs` trait, so there is no site that can fail to
+    /// read a committer date. The variant ships ahead of its caller
+    /// deliberately, so that the milestone which writes that implementation
+    /// finds the fail-closed answer already spelled out rather than having to
+    /// invent one under deadline.
+    DecisionTimeUnavailable {
+        /// Why it could not be read, for a maintainer to act on.
+        detail: String,
+    },
     /// The artifact declares a schema newer than this build supports.
     SchemaTooNew {
         /// What it declared.
@@ -276,11 +309,14 @@ impl UnverifiedReason {
             Self::BudgetExceeded { .. } => ReasonCode::BudgetExceeded,
             Self::GatesModified { .. } => ReasonCode::GatesModified,
             Self::StaleArtifact { .. } => ReasonCode::AdoptionStale,
+            Self::DecisionTimeUnavailable { .. } => ReasonCode::DecisionTimeUnavailable,
             _ => ReasonCode::CapabilityUnverified,
         }
     }
 
-    /// Whether this is a fact about the **policy** rather than about the code.
+    /// Whether this is a fact about the **evaluation** rather than about the
+    /// code — the policy this build was asked to apply, or an input the
+    /// decision itself is made from.
     ///
     /// Never advisory. `enforcement = "advisory"` written next to a typo'd
     /// capability name would otherwise be a two-token gate disable: the
@@ -289,12 +325,37 @@ impl UnverifiedReason {
     /// `CapabilityResolution::account` overrides the caller's [`Enforcement`]
     /// to the enforcing lane whenever this is true.
     ///
+    /// # Why a missing decision time is one of these
+    ///
+    /// [`DecisionTimeUnavailable`](Self::DecisionTimeUnavailable) is the third
+    /// variant here and the one that widened the name. It is not a fact about
+    /// the policy document, and the name is now slightly narrower than what it
+    /// covers — kept anyway, because renaming a `pub` predicate in the frozen
+    /// vocabulary is a larger change than the one sentence it saves.
+    ///
+    /// It belongs on this side for the same reason the other two do. A missing
+    /// committer date is not a result about the code: nothing was measured and
+    /// nothing came back "no". It is the run reporting that it could not obtain
+    /// the one input every time-dependent decision reads. Routing that to a
+    /// ledger nothing enforces would make the answer to "was this waiver still
+    /// live?" *no answer at all*, silently, on a lane chosen for a requirement
+    /// rather than for the failure — which is the "assume live" fail-open by a
+    /// different door.
+    ///
+    /// The contrast that keeps this from swallowing everything is
+    /// `an_expired_waiver_is_still_a_result_and_not_a_policy_fact`: a waiver
+    /// the author dated correctly and then let lapse *is* a fact about this
+    /// change, and stays on whichever lane its requirement declared. Missing
+    /// input, not lapsed authorisation — the two look adjacent and are not.
+    ///
     /// An exhaustive `match` rather than a `matches!`, so that a new
     /// [`UnverifiedReason`] variant has to be classified by whoever adds it.
     #[must_use]
     pub fn is_policy_integrity(&self) -> bool {
         match self {
-            Self::UnknownCapability { .. } | Self::UnknownParser { .. } => true,
+            Self::UnknownCapability { .. }
+            | Self::UnknownParser { .. }
+            | Self::DecisionTimeUnavailable { .. } => true,
             Self::Unparseable { .. }
             | Self::NoArtifact { .. }
             | Self::MissingEvidence
@@ -365,6 +426,13 @@ impl UnverifiedReason {
             Self::NoForge => {
                 "adoption needs access to the forge; running locally without a token".into()
             }
+            Self::DecisionTimeUnavailable { detail } => format!(
+                "the head commit's committer date could not be read ({detail}), so there \
+                 is no decision time to judge against; waiver expiry compares against \
+                 that date and never against the wall clock, and vibe-check will not \
+                 substitute one or assume a waiver is still live. Make the head commit \
+                 readable — a shallow or grafted checkout is the usual cause."
+            ),
             Self::SchemaTooNew { found, supported } => format!(
                 "evidence declares schema v{found} but this build supports up to v{supported}; \
                  upgrade vibe-check"
@@ -546,8 +614,10 @@ impl CapabilityResolution {
         }
     }
 
-    /// Whether this resolution is a fact about the policy rather than about the
-    /// code, and therefore may never be routed to the advisory ledger.
+    /// Whether this resolution is a fact about the evaluation — its policy or
+    /// its inputs — rather than about the code, and therefore may never be
+    /// routed to the advisory ledger. See
+    /// [`UnverifiedReason::is_policy_integrity`], which decides it.
     ///
     /// An exhaustive `match` rather than a `_` arm: a fifth resolution state
     /// would have to be classified here before it compiles.
@@ -574,10 +644,11 @@ impl CapabilityResolution {
     /// | policy-declared waiver, expired | as given | escalate that ledger to [`Tier::TOP`] — an expired waiver authorises nothing |
     /// | unverified | as given | escalate that ledger to [`Tier::TOP`] |
     /// | unverified, unknown capability or parser | **overridden** | escalate the *enforced* ledger to [`Tier::TOP`] |
+    /// | unverified, no committer date to judge against | **overridden** | escalate the *enforced* ledger to [`Tier::TOP`] |
     ///
     /// Note there is no path through this function in which an unanswered
     /// question leaves both tiers alone, and no path in which a fact about the
-    /// policy reaches the advisory ledger.
+    /// evaluation itself reaches the advisory ledger.
     ///
     /// # `at` is the committer date, and the only time this reads
     ///
@@ -612,9 +683,10 @@ impl CapabilityResolution {
         at: DecisionTime,
         adjudicators: &mut Adjudicators,
     ) {
-        // The routing rule, and the only line of this function that is new. An
-        // unknown identifier is a fact about the policy; policy integrity is
-        // never advisory, whatever the requirement asked for.
+        // The routing rule. An unknown identifier is a fact about the policy
+        // and a missing committer date is a fact about the run; neither is a
+        // result about the code, and neither may be routed to a ledger nothing
+        // enforces, whatever the requirement asked for.
         let lane = if self.is_policy_integrity() {
             Enforcement::Enforcing
         } else {
@@ -1026,6 +1098,9 @@ mod tests {
                 id: "loom-json@1".into(),
             },
             UnverifiedReason::NoForge,
+            UnverifiedReason::DecisionTimeUnavailable {
+                detail: "shallow clone: head commit is grafted".into(),
+            },
             UnverifiedReason::SchemaTooNew {
                 found: 9,
                 supported: 1,
@@ -1348,6 +1423,101 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn a_run_that_cannot_read_the_committer_date_escalates_the_enforced_ledger_whatever_the_lane_says()
+     {
+        // #32's third decision, as a property rather than a promise: *if
+        // `committer_date` is unavailable, escalate to `TOP`. Never "assume
+        // live".*
+        //
+        // The lane matters as much as the tier. Without the override, a
+        // requirement carrying `enforcement = "advisory"` would put "we could
+        // not date any waiver on this run" into a ledger nothing enforces, and
+        // the enforced verdict would come out `auto` — which is "assume live"
+        // reached by a different door, and it is the door that does not look
+        // like a fail-open while you are writing it.
+        let reason = UnverifiedReason::DecisionTimeUnavailable {
+            detail: "shallow clone: head commit is grafted".into(),
+        };
+        assert!(reason.is_policy_integrity(), "{reason:?}");
+
+        for enforcement in [Enforcement::Enforcing, Enforcement::Advisory] {
+            let resolution = CapabilityResolution::Unverified {
+                reason: reason.clone(),
+            };
+            let (enforced, advisory) = tiers_of(&resolution, enforcement);
+            assert_eq!(
+                enforced,
+                Tier::TOP,
+                "under {enforcement:?} a missing decision time must escalate the \
+                 enforced tier"
+            );
+            assert_eq!(
+                enforced.verdict(),
+                Verdict::Human,
+                "under {enforcement:?} a missing decision time must demand a human"
+            );
+            assert_eq!(
+                advisory,
+                Tier::BOTTOM,
+                "under {enforcement:?} it must not be routed to the advisory ledger \
+                 at all"
+            );
+        }
+    }
+
+    #[test]
+    fn a_missing_decision_time_is_told_apart_from_every_other_unverified_reason() {
+        // It gets a reason code of its own rather than sharing
+        // `CapabilityUnverified` with the ten variants that fall through to it.
+        // Two things depend on that. The escape-rate loop groups history by
+        // reason code, so "the checkout was wrong" and "the evidence was
+        // wrong" have to be countable apart — they have different fixes and
+        // one of them is not about the code at all. And a maintainer reading
+        // the ledger needs to be told that repairing the clone, not answering
+        // the capability, is what clears this.
+        let missing = UnverifiedReason::DecisionTimeUnavailable {
+            detail: "shallow clone: head commit is grafted".into(),
+        };
+        assert_eq!(
+            missing.reason_code(),
+            ReasonCode::DecisionTimeUnavailable,
+            "it does not fall through to the catch-all"
+        );
+
+        // Distinct from the two it is routed alongside, so that widening
+        // `is_policy_integrity` did not make the three indistinguishable
+        // downstream, and distinct from the nearest result-shaped neighbours.
+        for other in [
+            UnverifiedReason::UnknownCapability {
+                id: "tetss-pass".into(),
+            },
+            UnverifiedReason::UnknownParser {
+                id: "junti@1".into(),
+            },
+            UnverifiedReason::MissingEvidence,
+            UnverifiedReason::NoForge,
+            UnverifiedReason::ExecutionFailed {
+                detail: "git not on PATH".into(),
+            },
+        ] {
+            assert_ne!(
+                missing.reason_code(),
+                other.reason_code(),
+                "{other:?} must not group with a missing decision time"
+            );
+        }
+
+        // The message has to name the cause; "not implemented" without a next
+        // step leaves a maintainer guessing what they misconfigured.
+        let detail = missing.detail();
+        assert!(detail.contains("committer date"), "{detail}");
+        assert!(
+            detail.contains("shallow clone: head commit is grafted"),
+            "the underlying failure survives into the ledger: {detail}"
+        );
     }
 
     #[test]

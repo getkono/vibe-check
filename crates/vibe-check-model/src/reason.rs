@@ -114,6 +114,20 @@ pub enum ReasonCode {
     /// Never falls back to head policy, which would let a pull request be judged
     /// by rules it wrote.
     MergeBaseUnavailable,
+    /// The head commit's committer date could not be read.
+    ///
+    /// The decision clock is `vibe-check-host`'s `Vcs::committer_date`; every
+    /// time-dependent decision compares against it, and a waiver's `expires`
+    /// is the first of them. A run that cannot obtain it has an *unanswered*
+    /// question, not a defaulted one, and both of the obvious defaults are
+    /// fail-open: substituting the wall clock makes "is this waiver still
+    /// live?" depend on when CI happened to start, and assuming live honours a
+    /// waiver nobody can date. So the run escalates instead.
+    ///
+    /// Grouped with [`MergeBaseUnavailable`](Self::MergeBaseUnavailable)
+    /// rather than with the evidence codes on purpose: the missing thing is an
+    /// input to the evaluation, not a result about the code.
+    DecisionTimeUnavailable,
     /// vibe-check panicked. Emitted with a minimal bundle so that a crash is
     /// still a verdict, and specifically is still `human`.
     InternalPanic,
@@ -144,6 +158,7 @@ impl ReasonCode {
             Self::PolicyTooNew => "policy-too-new",
             Self::BinaryTooOld => "binary-too-old",
             Self::MergeBaseUnavailable => "merge-base-unavailable",
+            Self::DecisionTimeUnavailable => "decision-time-unavailable",
             Self::InternalPanic => "internal-panic",
         }
     }
@@ -282,6 +297,7 @@ mod tests {
             ReasonCode::GateIntegrity,
             ReasonCode::CapabilityUnverified,
             ReasonCode::CrateUncoveredAtMergeBase,
+            ReasonCode::DecisionTimeUnavailable,
             ReasonCode::InternalPanic,
         ] {
             let json = serde_json::to_string(&code).expect("serialize");
