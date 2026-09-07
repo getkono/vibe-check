@@ -124,13 +124,28 @@ jobs:
       # threat docs/releasing.md names, for which this job is the only automated
       # detector standing where a consumer stands.
       #
-      # What is observable from here is coarser than the exit code. The action
-      # exposes neither the code nor a reason, and its log cannot be read from a
-      # later step. dist/classify.sh creates the verdict file before it runs the
-      # binary, so the file's presence proves guard and install both passed —
-      # digest verification included — and an empty file proves the binary wrote
-      # no verdict document. Exit 2 and exit 101 leave the same trace as exit 1
-      # and are not separable from here; the step log carries that difference.
+      # This step reads two signals that the pinned `@v0.1.0` action does not
+      # emit yet, and one that every action ever released does.
+      #
+      # `exit-code` and `digest-verified` are added by this branch to
+      # dist/classify.sh and dist/install.sh, so they arrive here only once a
+      # release is cut from a commit that carries them and the pin above is
+      # advanced to it. Until then both are the empty string, and the
+      # assertion falls back to what is observable without them:
+      # dist/classify.sh creates the verdict file before it runs the binary, so
+      # the file's presence proves guard and install both passed — digest
+      # verification included — and an empty file proves the binary wrote no
+      # verdict document. That inference cannot separate exit 2 from exit 1,
+      # which is the one difference most worth seeing: exit 2 is the action
+      # passing flags the binary rejects, the action/binary incompatibility
+      # this job exists to catch, and today it reads green.
+      #
+      # Once the pin advances, `exit-code` is asserted to be exactly 1 and that
+      # blind spot closes, and `digest-verified=false` — the
+      # `VIBE_CHECK_BINARY` escape hatch, which skips the download and the
+      # digest check entirely — fails the job, because a digest-verified
+      # download is this job's whole claim. Both branches are written now so
+      # the release does not need a matching workflow change.
       #
       # When #62 implements `classify`, this step and the `continue-on-error`
       # above it both go, and the action step becomes terminal again.
@@ -142,6 +157,11 @@ jobs:
           # fallback to the path dist/classify.sh writes is there because that
           # is runner behaviour rather than a documented promise.
           VERDICT_FILE: ${{ steps.dogfood.outputs.verdict-file }}
+          # Empty on the pinned release. An unset output interpolates to the
+          # empty string rather than failing the expression, which is what
+          # makes the fallback above possible.
+          EXIT_CODE: ${{ steps.dogfood.outputs.exit-code }}
+          DIGEST_VERIFIED: ${{ steps.dogfood.outputs.digest-verified }}
         run: |
           set -euo pipefail
           verdict="${VERDICT_FILE:-${RUNNER_TEMP}/vibe-check.json}"
@@ -153,6 +173,42 @@ jobs:
               "step and the \`continue-on-error\` above it have outlived their" \
               "reason — delete both and let the action colour the job."
             echo "::error::the action passed; classify is implemented, so this assertion is stale"
+            exit 1
+          fi
+
+          # Checked before anything else the run produced, because if this is
+          # false then nothing downstream of it was verified either.
+          if [ "$DIGEST_VERIFIED" = false ]; then
+            note "### vibe-check dogfood" "" \
+              "The action reported \`digest-verified=false\`: it took the" \
+              "\`VIBE_CHECK_BINARY\` escape hatch and never compared the" \
+              "downloaded bytes against the digest committed at the pinned" \
+              "ref. Nothing in this workflow sets that variable, so either the" \
+              "action changed or the runner's environment did. A" \
+              "digest-verified download is the only thing this job claims to" \
+              "prove, and it did not happen."
+            echo "::error::vibe-check ran an unverified binary (digest-verified=false) — this job asserts a digest-verified download"
+            exit 1
+          fi
+
+          # Empty on the pinned release; the file checks below are the fallback.
+          if [ -n "$EXIT_CODE" ] && [ "$EXIT_CODE" != 1 ]; then
+            note "### vibe-check dogfood" "" \
+              "The action exited **${EXIT_CODE}**. This job asserts exit 1 —" \
+              "\`classify\` reporting it cannot produce a verdict, which is" \
+              "all it can do until #62. The table is" \
+              "\`crates/vibe-check/src/exit.rs\`:" \
+              "" \
+              "- \`2\` — the action passed flags the binary rejects. That is a" \
+              "  bug in the action, not in the change under test, and fixing" \
+              "  it means fixing \`dist/classify.sh\` or the action's inputs." \
+              "- \`101\` — the binary came apart before it started: a panic" \
+              "  ahead of the exit-code guard." \
+              "- \`0\`, \`10\`, \`20\` — a real verdict, so this assertion is" \
+              "  stale and should go along with the \`continue-on-error\`." \
+              "" \
+              "Read the action's step log."
+            echo "::error::vibe-check exited ${EXIT_CODE}, not 1 — see the job summary"
             exit 1
           fi
 
@@ -184,4 +240,14 @@ jobs:
             "reported it cannot produce a verdict, which it cannot until #62." \
             "The job passes because the chain is intact, not because the change" \
             "was judged."
+          if [ -z "$EXIT_CODE" ]; then
+            note "" \
+              "The pinned action does not expose \`exit-code\` yet, so this" \
+              "run inferred that from the verdict file alone — which cannot" \
+              "tell exit 2 (the action passing flags the binary rejects) or" \
+              "exit 101 apart from exit 1. Cutting a release from a commit" \
+              "that carries the output and advancing the \`@v0.1.0\` pin above" \
+              "turns that inference into an assertion; this step already reads" \
+              "the output when it is there."
+          fi
           echo "the published action ran and reported it cannot yet produce a verdict — expected until #62"
