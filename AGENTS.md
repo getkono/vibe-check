@@ -198,8 +198,15 @@ Three parts:
 
 1. **Same diff plus same policy yields the same verdict.**
 2. **Time-dependent *decisions* read the head commit's committer date, never the
-   wall clock.** Waiver expiry and artifact freshness compare against it, so
-   re-evaluating last month's pull request gives the verdict it had.
+   wall clock.** Waiver expiry is the one decision that compares against it
+   today, so re-evaluating last month's pull request gives the verdict it had.
+   Artifact freshness is **not** a second one: `UnverifiedReason::StaleArtifact`
+   compares the commit an artifact was produced from against the commit we
+   needed, and reads no date at all. It is named here as an example of the rule
+   in `clippy.toml`'s lint reason, which is a rule for the code that gets
+   written next rather than a description of code that exists. A run that cannot
+   obtain the committer date escalates to `Tier::TOP` on the enforced ledger
+   (`UnverifiedReason::DecisionTimeUnavailable`) rather than assuming a time.
 3. **Iteration order never reaches a digest or a bundle.**
 
 Enforced prophylactically by `clippy.toml`, which bans `HashMap` and `HashSet`

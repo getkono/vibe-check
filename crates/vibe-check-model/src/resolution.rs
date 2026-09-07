@@ -653,11 +653,45 @@ impl CapabilityResolution {
     /// # `at` is the committer date, and the only time this reads
     ///
     /// The waiver rows are the two the decision time separates, and `at` is
-    /// what separates them: the head commit's committer date, wrapped in
-    /// [`DecisionTime`](crate::time::DecisionTime) so that nothing else can
-    /// arrive here wearing the right name. A wall clock in this position would
-    /// make a waiver live when the pull request was opened and dead when CI
-    /// re-ran it a month later — the same commit, two verdicts.
+    /// what separates them: the head commit's committer date, carried as
+    /// [`DecisionTime`](crate::time::DecisionTime). A wall clock in this
+    /// position would make a waiver live when the pull request was opened and
+    /// dead when CI re-ran it a month later — the same commit, two verdicts.
+    ///
+    /// ## The wrapper is a nominal guard, not a proof
+    ///
+    /// [`DecisionTime`](crate::time::DecisionTime) does **not** make it
+    /// impossible for something else to arrive here wearing the right name.
+    /// `DecisionTime::from_committer_date` is `pub` and takes any
+    /// `jiff::Timestamp`, and `vibe-check-host`'s `Clock::now` returns exactly
+    /// that type, so `from_committer_date(clock.now())` compiles and passes
+    /// clippy — `Clock::now` is a trait method of ours and is not on
+    /// `clippy.toml`'s banned list. `time.rs` is already honest about this:
+    /// the constructor is "named for its one legitimate source rather than for
+    /// its argument type", which makes a wrong call site read wrongly rather
+    /// than fail to build.
+    ///
+    /// What actually keeps a clock out of this parameter today:
+    ///
+    /// - **`clippy.toml`**, which bans the types `std::time::SystemTime` and
+    ///   `std::time::Instant` and the methods `jiff::Timestamp::now`,
+    ///   `jiff::Zoned::now` and `jiff::tz::TimeZone::system`/`try_system`
+    ///   workspace-wide. Escaping one is an `#[allow]` with a comment, which
+    ///   is visible in review.
+    /// - **`vibe-check-host`'s `clock` module**, the single sanctioned
+    ///   wall-clock read, holding the workspace's only such `#[allow]`.
+    ///   Everything it produces is display-only and outside `verdict_digest`.
+    /// - **`tests/no_wall_clock_in_the_model.rs`**, which asserts this crate
+    ///   reads no clock at all, including a `fn now` it declared itself.
+    ///
+    /// **Not yet enforced:** nothing stops a caller in another crate from
+    /// composing that module's `Clock` into `from_committer_date`, because
+    /// neither of the two names involved is banned and no test reads call
+    /// sites outside this crate. There is no `Vcs` implementation in the
+    /// workspace yet, so there is no such call site to guard; the milestone
+    /// that writes one owns closing this, and the fail-closed answer for the
+    /// case where it *cannot* read a date is already here as
+    /// [`UnverifiedReason::DecisionTimeUnavailable`].
     ///
     /// It stays a parameter rather than a field on [`Resolutions`] or on
     /// [`Adjudicators`] because there is one caller that legitimately has *no*
