@@ -431,10 +431,14 @@ jobs:
           #    committed to master and pointed at by an immutable tag. The two
           #    are a `cp` apart today, and that `cp` is precisely the step
           #    between "verified" and "published" that nothing was watching. A
-          #    digest mistranscribed, truncated, or reordered between them is
-          #    fatal here instead of being discovered by a consumer whose
-          #    install fails a digest check against a release that is already
-          #    tagged and immutable.
+          #    digest mistranscribed between them is fatal here instead of
+          #    being discovered by a consumer whose install fails a digest
+          #    check against a release that is already tagged and immutable;
+          #    a truncated one is caught by the name-set comparison below,
+          #    which exists because this check does not catch it. Reordering is
+          #    neither caught nor a defect: SHA256SUMS is an unordered set of
+          #    rows, `install.sh` selects its row by name, and the build sorts
+          #    on write only to keep the committed diff readable.
           #
           #    Names in SHA256SUMS are bare basenames, so the check has to run
           #    with cwd inside verify/ and be handed an absolute path to the
@@ -450,6 +454,33 @@ jobs:
             echo "::error::verify/ is absent; 'Verify what GitHub actually serves' must run before this step"
             exit 1
           fi
+
+          #    Completeness first, because `sha256sum -c` does not check it.
+          #    It verifies every entry it is handed and says nothing whatever
+          #    about entries it was not handed: a dist/SHA256SUMS naming three
+          #    of the five archives passes it cleanly, and so does one naming
+          #    none in a way that still parses. The digest check below is
+          #    therefore an assertion about the rows present, not about the
+          #    file being the right file.
+          #
+          #    That gap fails closed rather than open — `dist/install.sh` emits
+          #    "has no committed digest in dist/SHA256SUMS at this ref" and
+          #    stops — but it fails closed on a consumer's runner, on one
+          #    platform, months later, against a tag that is already immutable
+          #    and cannot be corrected in place. Catching it here is the whole
+          #    point of self-checking before the push.
+          #
+          #    verify/SHA256SUMS is the reference set: the step above iterated
+          #    it to download, and every name in it was fetched from the public
+          #    release or the job already failed. Comparing name sets rather
+          #    than counting keeps this correct when the build matrix changes.
+          if ! diff -u \
+              <(awk '{ sub(/^\*/, "", $2); print $2 }' verify/SHA256SUMS | sort) \
+              <(awk '{ sub(/^\*/, "", $2); print $2 }' dist/SHA256SUMS | sort); then
+            echo "::error::dist/SHA256SUMS does not name the same archives as the verified release"
+            exit 1
+          fi
+
           (cd verify && sha256sum -c "${GITHUB_WORKSPACE}/dist/SHA256SUMS")
 
           git config user.name "github-actions[bot]"
