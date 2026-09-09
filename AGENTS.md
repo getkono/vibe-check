@@ -204,9 +204,14 @@ Three parts:
    compares the commit an artifact was produced from against the commit we
    needed, and reads no date at all. It is named here as an example of the rule
    in `clippy.toml`'s lint reason, which is a rule for the code that gets
-   written next rather than a description of code that exists. A run that cannot
-   obtain the committer date escalates to `Tier::TOP` on the enforced ledger
-   (`UnverifiedReason::DecisionTimeUnavailable`) rather than assuming a time.
+   written next rather than a description of code that exists.
+   `UnverifiedReason::DecisionTimeUnavailable` is the variant a run that cannot
+   obtain the committer date escalates through, to `Tier::TOP` on the enforced
+   ledger rather than assuming a time — but **nothing constructs one yet**, so
+   this is the shape the answer will take rather than behaviour you can observe
+   today. Enforcement lands with the caller that reads the committer date and
+   has to say it could not; `crates/vibe-check-model/src/resolution.rs` says so
+   at the variant.
 3. **Iteration order never reaches a digest or a bundle.**
 
 Enforced prophylactically by `clippy.toml`, which bans `HashMap` and `HashSet`
