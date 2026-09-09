@@ -45,7 +45,16 @@ description = "Assert the cargo-deny bans list against the resolved dependency g
 # fetches the RustSec database over the network on every run, turning a
 # cache-warm check into an unconditional fetch and making the gate fail on
 # upstream publication rather than on this workspace's own diff.
-run = "cargo deny check bans"
+# Assert the config exists before trusting the result. cargo-deny does not
+# treat a missing config as an error: it warns "unable to find a config path",
+# falls back to a default that bans nothing, and exits 0. So deleting or
+# renaming deny.toml turns this gate green rather than red, which is the
+# failure direction this workspace refuses everywhere else — and nothing else
+# in the workspace reads deny.toml, so nothing else would notice.
+run = """
+test -f deny.toml || { echo 'lint-deny: deny.toml is missing; cargo-deny would fall back to a default config that bans nothing' >&2; exit 1; }
+cargo deny check bans
+"""
 
 [tasks.lint-actions]
 description = "Lint GitHub Actions workflows"
