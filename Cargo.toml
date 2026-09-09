@@ -24,11 +24,44 @@ members  = ["crates/*"]
 [workspace.package]
 version      = "0.1.0"
 edition      = "2024"
-# Edition 2024 needs 1.85, but the `karet-*` dependencies raise the real floor.
-# This number is UNVERIFIED: nothing builds at 1.92, and `rust-toolchain.toml`
-# pins 1.97.1, so the two disagree and no gate notices. Making it true is a
-# maintainer's choice between two different costs — drop the claim to match the
-# pin, or add a CI job that builds at the stated floor — and is unfiled.
+# Edition 2024 needs 1.85; this workspace needs 1.92, and that number is
+# MEASURED, not asserted. Two separate floors were found, and cargo takes the
+# higher of them:
+#
+#   * Our own source floor is 1.91. `crates/vibe-check/src/panic.rs:173` calls
+#     `PanicHookInfo::payload_as_str()`, stabilized in 1.91; at 1.90 with
+#     `--ignore-rust-version` the workspace stops at `error[E0658]: use of
+#     unstable library feature 'panic_payload_as_str'`, and that one line is
+#     the whole of it. The flag is needed to see it: without it the karet
+#     floor below rejects 1.90 first and no compiler ever runs.
+#   * `karet-core` and `karet-vcs` 0.6.0 both declare `rust-version = "1.92"`.
+#     That is a declaration rather than a compile error — pass
+#     `--ignore-rust-version` and 1.91 builds the tree clean — but cargo
+#     enforces it for anyone who does not, so a consumer on 1.91 gets
+#     `error: rustc 1.91.0 is not supported by the following packages` and
+#     never reaches a compiler at all.
+#
+# A floor that cargo refuses to build at is not a floor, so this is 1.92: the
+# lowest toolchain on which `cargo check --workspace` actually succeeds. The
+# two numbers move independently — dropping the `payload_as_str()` call would
+# not lower this, and a karet release that lowers its own claim would.
+#
+# Two components, not three. The floor is a language-and-library fact, so
+# 1.92.0 and 1.92.7 are the same fact; naming a patch level would refuse a
+# toolchain for a reason that has nothing to do with whether the code compiles.
+# `rust-toolchain.toml` still pins 1.97.1 — that pin is about reproducing a
+# verdict, not about what a consumer must have, and the two are allowed to
+# differ now that each says something true.
+#
+# This is the "make the claim true" branch of #94, and the half that keeps it
+# true is in CI: the `msrv` job in `.github/workflows/ci.yml` reads this line
+# and runs `cargo check --workspace --all-targets --all-features` at whatever
+# it says, on every run of the workflow, alongside the `quality` job that runs
+# at the pin. It reads the number rather than repeating it so that lowering
+# this line cannot leave the job testing the old one. A stated MSRV that nothing exercises is a promise nobody tests, which is
+# the defect #94 was filed about; raising the real floor now fails that job on
+# the pull request that raised it rather than drifting silently. If it fails,
+# move this number and say what moved it — do not widen the job.
 rust-version = "1.92"
 license      = "MIT"
 repository   = "https://github.com/getkono/vibe-check"

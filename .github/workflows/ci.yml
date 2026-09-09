@@ -47,6 +47,68 @@ jobs:
       - name: Check
         run: mise run check
 
+  msrv:
+    name: MSRV
+    runs-on: ubuntu-latest
+    # `rust-version` in Cargo.toml claims a floor of 1.92. A stated MSRV that
+    # nothing exercises is a promise nobody tests — precisely the defect #94
+    # was filed about — because the number can only break for a consumer on an
+    # older toolchain, never for us on the pinned one. This job is what makes
+    # the claim falsifiable: reach for something newer than 1.92, in our own
+    # source or in a dependency's declared floor, and it fails here, on the
+    # pull request that reached, rather than in somebody else's build.
+    #
+    # `RUSTUP_TOOLCHAIN` rather than `cargo +<floor>`: both override
+    # `rust-toolchain.toml`, so either would reach the floor. The environment
+    # variable is chosen because it applies to every cargo and rustc invocation
+    # in the job without threading a `+toolchain` argument through each one,
+    # including the ones `Swatinem/rust-cache` makes on its own. Two
+    # components, matching `rust-version`, so this tracks the newest patch of
+    # the floor rather than pinning a patch level the floor does not depend on.
+    #
+    # `cargo check`, not `mise run check`: the claim under test is that the
+    # workspace *builds* at the floor. Formatting, clippy, and test outcomes
+    # belong to the pinned toolchain in `quality`; gating them here would turn
+    # every lint the older clippy happens to disagree about into an MSRV
+    # failure. No `--ignore-rust-version` either — the dependency floors cargo
+    # enforces are half of what this job is measuring.
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      # Read the floor out of Cargo.toml rather than restating it here. A
+      # second copy of the number makes this job measure itself: LOWERING
+      # `rust-version` to widen the promise would leave a hard-coded job still
+      # checking the old, higher number and still passing — the stated floor
+      # unexercised again, which is the defect #94 was filed about, one level
+      # up. Raising it was always caught; lowering it was not.
+      #
+      # awk over the manifest rather than `cargo metadata`, because metadata
+      # resolves through a toolchain and this step runs before one is chosen.
+      - name: Read the declared floor
+        run: |
+          set -euo pipefail
+          floor="$(awk '
+            /^\[workspace\.package\]/ { p = 1; next }
+            /^\[/                       { p = 0 }
+            p && /^rust-version[[:space:]]*=/ { gsub(/[^0-9.]/, "", $NF); print $NF; exit }
+          ' Cargo.toml)"
+          case "$floor" in
+            [0-9]*.[0-9]*) ;;
+            *) echo "::error::could not read rust-version from [workspace.package] in Cargo.toml"; exit 1 ;;
+          esac
+          echo "Declared floor: ${floor}"
+          echo "RUSTUP_TOOLCHAIN=${floor}" >> "$GITHUB_ENV"
+      - name: Install Rust toolchain
+        run: rustup toolchain install --profile minimal --no-self-update "$RUSTUP_TOOLCHAIN"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: msrv
+      - name: Check at the MSRV floor
+        run: |
+          echo "Checking at ${RUSTUP_TOOLCHAIN}, read from Cargo.toml"
+          cargo check --workspace --all-targets --all-features
+
   commits:
     name: Conventional commits
     if: github.event_name == 'pull_request'
