@@ -324,9 +324,13 @@ The list is the contract, not its length: `lint-actions` is itself three
 commands, so counting tasks was never the same as counting what runs. Read the
 `[tasks.check]` array in `mise.toml` for what is actually gated.
 
-CI runs `mise run check` verbatim (`.github/workflows/ci.yml:41`) rather than
-spelling the cargo invocations out again, because duplicating them is how CI and
-the hooks drift apart.
+CI runs `mise run check` verbatim (the `Check` step in
+`.github/workflows/ci.yml`) rather than spelling the cargo invocations out
+again, because duplicating them is how CI and the hooks drift apart. The step is
+named rather than cited by line, because a line number here goes stale on the
+next edit to that file — this change moved it once already — and a stale
+citation in this contract reads as a claim about a line that now says something
+else.
 
 `hk.pkl` routes through the **same** `mise` task interface, but it does not call
 `check`. It calls the leaf tasks:
