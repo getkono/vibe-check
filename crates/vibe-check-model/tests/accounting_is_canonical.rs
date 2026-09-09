@@ -34,11 +34,28 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
+use jiff::civil::Date;
 use proptest::prelude::*;
 use vibe_check_model::{
-    Adjudicators, CapabilityResolution, Confidence, Enforcement, Escalation, EvidenceRef,
-    RequirementId, ResolutionState, Resolutions, Tier, UnverifiedReason,
+    Adjudicators, CapabilityResolution, Confidence, DecisionTime, Enforcement, Escalation,
+    EvidenceRef, PolicyRef, ReasonCode, RequirementId, ResolutionState, Resolutions, SkipReason,
+    Tier, UnverifiedReason,
 };
+
+/// The decision time every `account_into` call here is made at.
+///
+/// `account_into` takes one because waiver expiry is decided against the head
+/// commit's committer date. Every fixture in this file resolves `Unverified`,
+/// which reads no date at all, so the value is arbitrary and the assertions
+/// below are indifferent to it — it is threaded through only because there is
+/// no way to account anything without naming when.
+fn decision_time() -> DecisionTime {
+    DecisionTime::from_committer_date(
+        "2026-06-01T00:00:00Z"
+            .parse()
+            .expect("a well-formed fixture timestamp"),
+    )
+}
 
 /// A shape-valid requirement identifier from a readable name.
 ///
@@ -103,7 +120,7 @@ fn account(order: &[RequirementId]) -> (Vec<Escalation>, Vec<Escalation>) {
     }
 
     let mut adjudicators = Adjudicators::new();
-    resolutions.account_into(&mut adjudicators);
+    resolutions.account_into(decision_time(), &mut adjudicators);
     let (enforced, advisory) = adjudicators.finish();
     (
         enforced.into_adjudication().escalations,
@@ -220,7 +237,7 @@ fn the_ledger_serializes() {
     );
     assert!(displaced.is_none(), "the fixture uses distinct identifiers");
     let mut adjudicators = Adjudicators::new();
-    resolutions.account_into(&mut adjudicators);
+    resolutions.account_into(decision_time(), &mut adjudicators);
     let ledger = adjudicators.finish().0.into_adjudication().escalations;
     assert_eq!(ledger.len(), 1);
 
@@ -283,7 +300,7 @@ fn both_ledgers_are_ordered() {
     assert!(displaced.is_none(), "the fixture uses distinct identifiers");
 
     let mut adjudicators = Adjudicators::new();
-    resolutions.account_into(&mut adjudicators);
+    resolutions.account_into(decision_time(), &mut adjudicators);
     let (enforced, advisory) = adjudicators.finish();
     let enforced = enforced.into_adjudication();
 
@@ -369,7 +386,7 @@ fn the_tally_and_the_ledger_read_the_same_map() {
     );
 
     let mut adjudicators = Adjudicators::new();
-    resolutions.account_into(&mut adjudicators);
+    resolutions.account_into(decision_time(), &mut adjudicators);
     let (enforced, advisory) = adjudicators.finish();
     assert_eq!(
         enforced.adjudication().escalations.len() + advisory.count(),
@@ -379,5 +396,90 @@ fn the_tally_and_the_ledger_read_the_same_map() {
         resolutions
             .states()
             .all(|(state, _)| state == ResolutionState::Unverified)
+    );
+}
+
+/// `account_into` forwards the decision time it was handed.
+///
+/// Every other fixture in this file resolves `Unverified`, which reads no date
+/// at all — as `decision_time`'s own doc says. That makes the `at` argument
+/// unobserved here: discard it inside the walk, substitute a constant, and
+/// every other assertion in this file still passes. That is not a hypothetical.
+/// Replacing the forwarded value with a hardcoded date leaves the whole
+/// `vibe-check-model` suite green, so nothing pinned the forwarding.
+///
+/// Waiver expiry is the only decision that reads the date, so a declared skip
+/// is the only fixture that can pin it. It has to be pinned *through this
+/// entry point* rather than through `CapabilityResolution::account`, which is
+/// `pub(crate)`: `account_into` is the sole way in from outside the crate and
+/// therefore the path production takes. The in-module expiry tests drive
+/// `account` directly and would not notice a walk that stopped forwarding.
+///
+/// `time.rs` says one decision time per evaluation is true "by construction".
+/// Construction does not check itself.
+#[test]
+fn account_into_forwards_the_decision_time_to_the_resolutions_it_walks() {
+    let waiver = CapabilityResolution::Skipped {
+        reason: SkipReason::Declared {
+            policy_ref: PolicyRef {
+                path: ".vibe-check/policy.toml".into(),
+                kind: "skip".into(),
+                id: "macros-no-miri".into(),
+                blob_sha: None,
+            },
+            reason: "proc-macro crate forbids unsafe".into(),
+            owner: "@kono/platform".into(),
+            expires: Date::constant(2027, 1, 1),
+        },
+    };
+
+    // One requirement, one lane, one escalation — so the ledger below is read
+    // without any ordering question getting in the way.
+    let account_at = |year, month, day| {
+        let mut resolutions = Resolutions::new();
+        let displaced = resolutions.insert(
+            requirement("waiver"),
+            Enforcement::Enforcing,
+            waiver.clone(),
+        );
+        assert!(displaced.is_none(), "the fixture inserts one requirement");
+
+        let at = DecisionTime::from_committer_date(
+            format!("{year:04}-{month:02}-{day:02}T00:00:00Z")
+                .parse()
+                .expect("a well-formed fixture timestamp"),
+        );
+
+        let mut adjudicators = Adjudicators::new();
+        resolutions.account_into(at, &mut adjudicators);
+        let (enforced, _) = adjudicators.finish();
+        let adjudication = enforced.into_adjudication();
+        assert_eq!(
+            adjudication.escalations.len(),
+            1,
+            "one requirement leaves one escalation"
+        );
+        (
+            adjudication.escalations[0].reason,
+            adjudication.escalations[0].to,
+        )
+    };
+
+    // Before the expiry date the waiver is live: a human granted it, so it
+    // costs T1 and says so.
+    assert_eq!(
+        account_at(2026, 6, 1),
+        (ReasonCode::DeclaredSkip, Tier::T1),
+        "a waiver that has not lapsed authorises the skip through account_into"
+    );
+
+    // After it, the same resolutions map accounted through the same call must
+    // reach TOP. The only thing that changed is the argument, so a walk that
+    // stopped forwarding it fails here.
+    assert_eq!(
+        account_at(2027, 6, 1),
+        (ReasonCode::ExpiredSkip, Tier::TOP),
+        "account_into must forward the date it was given, or expiry is decided \
+         against a value the caller never supplied"
     );
 }

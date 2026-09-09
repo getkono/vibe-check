@@ -1,0 +1,50 @@
+# vibe-check — cargo-deny bans configuration.
+#
+# The real, exercised guarantee against these packages is a test — crates/
+# vibe-check-model/tests/no_key_parser_or_tui_in_the_tree.rs — which reads
+# Cargo.lock and bans `ratatui` by *prefix*, catching every sibling below plus
+# any future one, on every `mise run test`. This file names packages by exact
+# crate name only: cargo-deny's [bans.deny] matcher supports no wildcard or
+# glob (verified empirically — a pattern like "ratatui-*" does not match
+# "ratatui-core" the way it would in the lockfile test's prefix check), so
+# enumeration is the only option cargo-deny gives us, not a design choice.
+#
+# That makes this list a point-in-time enumeration of the ratatui/ratatui
+# workspace's first-party crates, verified against crates.io, and upstream can
+# outgrow it the moment it publishes a new sibling. When that happens this
+# file goes stale silently — `cargo deny check bans` reports "bans ok" for a
+# sibling it does not yet know about — while the lockfile test still catches
+# it by prefix. The test is the authoritative guarantee; this file is a
+# second instrument reading a different source (`cargo metadata` instead of a
+# hand-parsed lock), not a wider one, and must not be read as complete.
+#
+# advisories, licenses, and sources are deliberately absent: nothing here runs
+# `cargo deny check` against them, and `check advisories` fetches the RustSec
+# database over the network on every run, which would make this gate fail on
+# upstream publication rather than on the diff in front of it.
+#
+# `check bans` is not itself network-free, whatever the name suggests. It builds
+# its graph from `cargo metadata` rather than reading Cargo.lock as text, so it
+# resolves the dependency graph: with a cold CARGO_HOME it downloads the index
+# and the crate files, and with CARGO_NET_OFFLINE=true it fails outright. It is
+# free only against a warm registry cache.
+#
+# That is affordable because `mise run lint-deny` runs from `mise run check`,
+# which is CI's entry point (.github/workflows/ci.yml) and nothing else's. The
+# `hk` pre-push hook calls the leaf tasks — format-check, lint, test, commits —
+# and never `check`, so pre-push stays hermetic and the network requirement is
+# confined to a runner that has one. Do not add this task to a git hook.
+
+[bans]
+deny = [
+    { crate = "ssh-key", reason = "parses key material; karet-vcs's default `signature` feature pulls it in, and this workspace runs untrusted pull-request code" },
+    { crate = "ratatui", reason = "a terminal UI; enabled only by the `view` feature on a karet crate, which must never be turned on in this headless process" },
+    { crate = "ratatui-core", reason = "a ratatui 0.30 sibling published from the ratatui/ratatui workspace; a crate can depend on it directly, so banning only the facade would let the terminal UI in through the side door" },
+    { crate = "ratatui-widgets", reason = "a ratatui 0.30 sibling published from the ratatui/ratatui workspace; same reasoning as ratatui-core" },
+    { crate = "ratatui-macros", reason = "a ratatui 0.30 sibling published from the ratatui/ratatui workspace; same reasoning as ratatui-core" },
+    { crate = "ratatui-crossterm", reason = "a ratatui 0.30 sibling published from the ratatui/ratatui workspace (the crossterm terminal backend); same reasoning as ratatui-core" },
+    { crate = "ratatui-termina", reason = "a ratatui 0.30 sibling published from the ratatui/ratatui workspace (the termina terminal backend); same reasoning as ratatui-core" },
+    { crate = "ratatui-termion", reason = "a ratatui 0.30 sibling published from the ratatui/ratatui workspace (the termion terminal backend); same reasoning as ratatui-core" },
+    { crate = "ratatui-termwiz", reason = "a ratatui 0.30 sibling published from the ratatui/ratatui workspace (the termwiz terminal backend); same reasoning as ratatui-core" },
+    { crate = "ratatui-layout", reason = "a ratatui sibling published from the ratatui/ratatui workspace; a workspace member rather than a default member, which is why the first pass over `default-members` missed it — the same way the next one will be missed" },
+]

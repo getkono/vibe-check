@@ -3,11 +3,16 @@
 //! # Two clocks, and only one of them decides anything
 //!
 //! **Decision time** is the committer date of the head commit, read via
-//! [`Vcs::committer_date`](crate::vcs::Vcs::committer_date). Waiver expiry and
-//! artifact freshness compare against it, so re-evaluating a pull request from
-//! last month yields the verdict it had rather than a fresh one. A rule that
-//! changes its answer depending on when you ask is not a rule anybody can
-//! reason about.
+//! [`Vcs::committer_date`](crate::vcs::Vcs::committer_date). Waiver expiry
+//! compares against it, so re-evaluating a pull request from last month yields
+//! the verdict it had rather than a fresh one. A rule that changes its answer
+//! depending on when you ask is not a rule anybody can reason about.
+//!
+//! Waiver expiry is the only such decision today. Artifact freshness is not a
+//! second one: `UnverifiedReason::StaleArtifact` compares the commit an
+//! artifact was produced from against the commit we needed, and reads no date.
+//! It appears in `clippy.toml`'s lint reason as an instance of the rule that
+//! binds whatever gets written next, not as a description of what is written.
 //!
 //! **Display time** is this module. It stamps "generated at" into the bundle and
 //! measures durations for the report. It cannot affect a verdict, and it does

@@ -1,6 +1,10 @@
 [tools]
 hk = "1.53.0"
 "cargo:convco" = "0.7.1"
+# Prebuilt, not `cargo:`. Installing it from source put a two-minute compile on
+# the critical path of every CI job, and two concurrent `cargo install` runs
+# raced each other's rustup component download and failed a required check.
+"aqua:EmbarkStudios/cargo-deny" = "0.20.2"
 actionlint = "1.7.7"
 # Lints dist/*.sh, which actionlint structurally cannot see: it reads workflow
 # files only, and the action's logic lives in shell so that it is lintable at
@@ -22,6 +26,35 @@ run = "cargo clippy --workspace --all-targets --all-features -- -D warnings"
 [tasks.lint-fix]
 description = "Apply safe Clippy fixes"
 run = "cargo clippy --workspace --fix --allow-dirty --allow-staged --all-targets --all-features"
+
+[tasks.lint-deny]
+description = "Assert the cargo-deny bans list against the resolved dependency graph"
+# Not network-free. `check bans` builds its graph from `cargo metadata`, not by
+# reading Cargo.lock as text, so it resolves the dependency graph and needs a
+# warm registry cache or network access: against a cold CARGO_HOME it downloads
+# the index and the crate files, and under CARGO_NET_OFFLINE=true it fails
+# outright.
+#
+# That cost lands in CI only, and deliberately. `hk.pkl` never calls `check`;
+# the pre-push hook calls the leaf tasks — format-check, lint, test, commits —
+# and this task is not among them. So wiring `lint-deny` into `check` leaves
+# pre-push hermetic and offline-capable, and AGENTS.md §9's hermetic-test rule
+# is intact. Adding this task to the pre-push hook is what would break it.
+#
+# Never call bare `cargo deny check` or add `check advisories` here: advisories
+# fetches the RustSec database over the network on every run, turning a
+# cache-warm check into an unconditional fetch and making the gate fail on
+# upstream publication rather than on this workspace's own diff.
+# Assert the config exists before trusting the result. cargo-deny does not
+# treat a missing config as an error: it warns "unable to find a config path",
+# falls back to a default that bans nothing, and exits 0. So deleting or
+# renaming deny.toml turns this gate green rather than red, which is the
+# failure direction this workspace refuses everywhere else — and nothing else
+# in the workspace reads deny.toml, so nothing else would notice.
+run = """
+test -f deny.toml || { echo 'lint-deny: deny.toml is missing; cargo-deny would fall back to a default config that bans nothing' >&2; exit 1; }
+cargo deny check bans
+"""
 
 [tasks.lint-actions]
 description = "Lint GitHub Actions workflows"
@@ -69,10 +102,17 @@ run = "cargo insta accept --workspace"
 
 [tasks.check]
 description = "Run all read-only quality checks"
+# `lint-deny` sits with the other static checks rather than after `test`,
+# because it is one: it inspects the resolved dependency graph and never builds
+# or runs the workspace's code. Ordering here is cheapest-first among things
+# that can fail on their own terms, with the slowest task last — a banned
+# transitive crate should be reported before spending several minutes compiling
+# the test binaries that would link it.
 run = [
   { task = "format-check" },
   { task = "lint" },
   { task = "lint-actions" },
+  { task = "lint-deny" },
   { task = "test" },
 ]
 

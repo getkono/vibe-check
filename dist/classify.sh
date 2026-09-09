@@ -32,6 +32,14 @@ cd "$GITHUB_WORKSPACE" || exit 1
 "$VIBE_CHECK_BIN" classify --format json "${args[@]}" > "$out"
 code=$?
 
+# Published before the case below, so it is set on every path where a code
+# exists — including the codes the table does not describe. A caller that has
+# to infer the exit code from the file's presence and size cannot tell exit 2
+# (the action passed flags the binary rejects) from exit 1, and that is exactly
+# the action/binary incompatibility a caller most needs to see. The step still
+# fails; this output is for whoever runs after it.
+echo "exit-code=${code}" >> "$GITHUB_OUTPUT"
+
 # The exit table is crates/vibe-check-cli/src/exit.rs, and it is a public
 # interface. At this milestone `classify` decides nothing, so any non-zero is a
 # failure of the tool rather than a verdict, and the step fails. When the

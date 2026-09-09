@@ -16,9 +16,18 @@
 //! exception:
 //!
 //! - an unverified capability escalates to [`Tier::TOP`]
-//! - a human-authored waiver escalates to [`Tier::T1`]
+//! - a live human-authored waiver escalates to [`Tier::T1`]
+//! - a waiver whose `expires` date has passed escalates to [`Tier::TOP`], with
+//!   [`ReasonCode::ExpiredSkip`]. It stops being a waiver: an authorisation
+//!   with a date on it that nothing compares against is not an authorisation,
+//!   it is a comment. The comparison is against the decision time — the head
+//!   commit's committer date — never the wall clock, so re-running last
+//!   month's pull request still gives last month's verdict
 //! - an unknown identifier is a fact about the *policy*, not a result about the
 //!   code, and policy integrity is never advisory
+//! - a missing committer date is a fact about the *run*, and takes the same
+//!   route for the same reason: there is no decision time, so no waiver can be
+//!   dated, and "assume live" is a fail-open whichever lane it lands on
 //!
 //! Because there is one consumer, there is one place to audit. That is also why
 //! choosing between the enforced and advisory ledgers happens here rather than
@@ -73,6 +82,7 @@ use crate::evidence::Evidence;
 use crate::ids::{CapabilityId, ParserId, RequirementId};
 use crate::reason::{EvidenceRef, PolicyRef, ReasonCode};
 use crate::tier::Tier;
+use crate::time::DecisionTime;
 
 /// What the evidence says.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
@@ -122,10 +132,14 @@ pub enum SkipReason {
     },
     /// A policy waiver declares the capability not applicable.
     ///
-    /// Costs [`Tier::T1`]. A human wrote this down, and a change that relies on
-    /// a human's waiver is precisely the change that should not merge
-    /// unattended. Long-lived waivers becoming permanently mildly annoying is
-    /// the intended behaviour; the escape-rate loop is how they get retired.
+    /// Costs [`Tier::T1`] while it is live. A human wrote this down, and a
+    /// change that relies on a human's waiver is precisely the change that
+    /// should not merge unattended. Long-lived waivers becoming permanently
+    /// mildly annoying is the intended behaviour; the escape-rate loop is how
+    /// they get retired.
+    ///
+    /// Past its `expires` date it costs [`Tier::TOP`] instead — see that
+    /// field.
     Declared {
         /// The policy entry that granted it.
         policy_ref: PolicyRef,
@@ -135,8 +149,20 @@ pub enum SkipReason {
         owner: String,
         /// When it lapses.
         ///
-        /// Compared against the head commit's committer date, never the wall
-        /// clock, so that re-running an old pull request gives the same verdict.
+        /// `CapabilityResolution::account` compares this against the
+        /// [`DecisionTime`]'s UTC civil date — the head commit's committer
+        /// date, never the wall clock, so that re-running an old pull request
+        /// gives the same verdict it had.
+        ///
+        /// The waiver is **live through the whole of this day**: it is expired
+        /// only when the decision date is strictly greater. That sense is
+        /// pinned by name in
+        /// `the_expiry_boundary_is_inclusive_of_the_expiry_day`, because the
+        /// operator alone is exactly the detail a later refactor flips without
+        /// noticing — which is how this field came to be documented as compared
+        /// against something while nothing compared it. Once expired the skip
+        /// escalates [`Tier::TOP`] with [`ReasonCode::ExpiredSkip`] rather than
+        /// [`Tier::T1`] with [`ReasonCode::DeclaredSkip`].
         expires: Date,
     },
 }
@@ -229,6 +255,36 @@ pub enum UnverifiedReason {
     },
     /// Adoption needs a forge and there is none, e.g. running locally.
     NoForge,
+    /// The head commit's committer date could not be read, so there is no
+    /// [`DecisionTime`] to judge anything against.
+    ///
+    /// The third of #32's three decisions, and the one that is a property of
+    /// this type rather than a promise in prose: *if `committer_date` is
+    /// unavailable, escalate to [`Tier::TOP`]; never "assume live"*. Both of
+    /// the ways a caller might carry on regardless are fail-open. Treating
+    /// every waiver as live honours authorisations that may have lapsed years
+    /// ago. Substituting the wall clock makes a waiver live when the pull
+    /// request was opened and dead when CI re-ran it, which is the replay
+    /// property gone — and it is the substitution
+    /// [`DecisionTime`]'s missing `Default` and missing `From<Timestamp>`
+    /// exist to make awkward. This variant is what a caller reaches for
+    /// instead, and it is the reason those absences leave the caller somewhere
+    /// to go.
+    ///
+    /// [`is_policy_integrity`](Self::is_policy_integrity) is `true` for it, so
+    /// it lands on the enforced ledger whatever the requirement's lane says —
+    /// see that method for why.
+    ///
+    /// Nothing constructs one yet: the workspace has no implementation of
+    /// `vibe-check-host`'s `Vcs` trait, so there is no site that can fail to
+    /// read a committer date. The variant ships ahead of its caller
+    /// deliberately, so that the milestone which writes that implementation
+    /// finds the fail-closed answer already spelled out rather than having to
+    /// invent one under deadline.
+    DecisionTimeUnavailable {
+        /// Why it could not be read, for a maintainer to act on.
+        detail: String,
+    },
     /// The artifact declares a schema newer than this build supports.
     SchemaTooNew {
         /// What it declared.
@@ -253,11 +309,14 @@ impl UnverifiedReason {
             Self::BudgetExceeded { .. } => ReasonCode::BudgetExceeded,
             Self::GatesModified { .. } => ReasonCode::GatesModified,
             Self::StaleArtifact { .. } => ReasonCode::AdoptionStale,
+            Self::DecisionTimeUnavailable { .. } => ReasonCode::DecisionTimeUnavailable,
             _ => ReasonCode::CapabilityUnverified,
         }
     }
 
-    /// Whether this is a fact about the **policy** rather than about the code.
+    /// Whether this is a fact about the **evaluation** rather than about the
+    /// code — the policy this build was asked to apply, or an input the
+    /// decision itself is made from.
     ///
     /// Never advisory. `enforcement = "advisory"` written next to a typo'd
     /// capability name would otherwise be a two-token gate disable: the
@@ -266,12 +325,37 @@ impl UnverifiedReason {
     /// `CapabilityResolution::account` overrides the caller's [`Enforcement`]
     /// to the enforcing lane whenever this is true.
     ///
+    /// # Why a missing decision time is one of these
+    ///
+    /// [`DecisionTimeUnavailable`](Self::DecisionTimeUnavailable) is the third
+    /// variant here and the one that widened the name. It is not a fact about
+    /// the policy document, and the name is now slightly narrower than what it
+    /// covers — kept anyway, because renaming a `pub` predicate in the frozen
+    /// vocabulary is a larger change than the one sentence it saves.
+    ///
+    /// It belongs on this side for the same reason the other two do. A missing
+    /// committer date is not a result about the code: nothing was measured and
+    /// nothing came back "no". It is the run reporting that it could not obtain
+    /// the one input every time-dependent decision reads. Routing that to a
+    /// ledger nothing enforces would make the answer to "was this waiver still
+    /// live?" *no answer at all*, silently, on a lane chosen for a requirement
+    /// rather than for the failure — which is the "assume live" fail-open by a
+    /// different door.
+    ///
+    /// The contrast that keeps this from swallowing everything is
+    /// `an_expired_waiver_is_still_a_result_and_not_a_policy_fact`: a waiver
+    /// the author dated correctly and then let lapse *is* a fact about this
+    /// change, and stays on whichever lane its requirement declared. Missing
+    /// input, not lapsed authorisation — the two look adjacent and are not.
+    ///
     /// An exhaustive `match` rather than a `matches!`, so that a new
     /// [`UnverifiedReason`] variant has to be classified by whoever adds it.
     #[must_use]
     pub fn is_policy_integrity(&self) -> bool {
         match self {
-            Self::UnknownCapability { .. } | Self::UnknownParser { .. } => true,
+            Self::UnknownCapability { .. }
+            | Self::UnknownParser { .. }
+            | Self::DecisionTimeUnavailable { .. } => true,
             Self::Unparseable { .. }
             | Self::NoArtifact { .. }
             | Self::MissingEvidence
@@ -342,6 +426,13 @@ impl UnverifiedReason {
             Self::NoForge => {
                 "adoption needs access to the forge; running locally without a token".into()
             }
+            Self::DecisionTimeUnavailable { detail } => format!(
+                "the head commit's committer date could not be read ({detail}), so there \
+                 is no decision time to judge against; waiver expiry compares against \
+                 that date and never against the wall clock, and vibe-check will not \
+                 substitute one or assume a waiver is still live. Make the head commit \
+                 readable — a shallow or grafted checkout is the usual cause."
+            ),
             Self::SchemaTooNew { found, supported } => format!(
                 "evidence declares schema v{found} but this build supports up to v{supported}; \
                  upgrade vibe-check"
@@ -523,8 +614,10 @@ impl CapabilityResolution {
         }
     }
 
-    /// Whether this resolution is a fact about the policy rather than about the
-    /// code, and therefore may never be routed to the advisory ledger.
+    /// Whether this resolution is a fact about the evaluation — its policy or
+    /// its inputs — rather than about the code, and therefore may never be
+    /// routed to the advisory ledger. See
+    /// [`UnverifiedReason::is_policy_integrity`], which decides it.
     ///
     /// An exhaustive `match` rather than a `_` arm: a fifth resolution state
     /// would have to be classified here before it compiles.
@@ -547,13 +640,70 @@ impl CapabilityResolution {
     /// | inconclusive | as given | escalate that ledger to [`Tier::TOP`] — an inconclusive result is not a pass |
     /// | satisfied, but only *declared* | as given | escalate that ledger to [`Tier::TOP`] — an assertion is not a measurement |
     /// | engine-derived skip | either | nothing |
-    /// | policy-declared waiver | as given | escalate that ledger to [`Tier::T1`] |
+    /// | policy-declared waiver, still live | as given | escalate that ledger to [`Tier::T1`] |
+    /// | policy-declared waiver, expired | as given | escalate that ledger to [`Tier::TOP`] — an expired waiver authorises nothing |
     /// | unverified | as given | escalate that ledger to [`Tier::TOP`] |
     /// | unverified, unknown capability or parser | **overridden** | escalate the *enforced* ledger to [`Tier::TOP`] |
+    /// | unverified, no committer date to judge against | **overridden** | escalate the *enforced* ledger to [`Tier::TOP`] |
     ///
     /// Note there is no path through this function in which an unanswered
     /// question leaves both tiers alone, and no path in which a fact about the
-    /// policy reaches the advisory ledger.
+    /// evaluation itself reaches the advisory ledger.
+    ///
+    /// # `at` is the committer date, and the only time this reads
+    ///
+    /// The waiver rows are the two the decision time separates, and `at` is
+    /// what separates them: the head commit's committer date, carried as
+    /// [`DecisionTime`](crate::time::DecisionTime). A wall clock in this
+    /// position would make a waiver live when the pull request was opened and
+    /// dead when CI re-ran it a month later — the same commit, two verdicts.
+    ///
+    /// ## The wrapper is a nominal guard, not a proof
+    ///
+    /// [`DecisionTime`](crate::time::DecisionTime) does **not** make it
+    /// impossible for something else to arrive here wearing the right name.
+    /// `DecisionTime::from_committer_date` is `pub` and takes any
+    /// `jiff::Timestamp`, and `vibe-check-host`'s `Clock::now` returns exactly
+    /// that type, so `from_committer_date(clock.now())` compiles and passes
+    /// clippy — `Clock::now` is a trait method of ours and is not on
+    /// `clippy.toml`'s banned list. `time.rs` is already honest about this:
+    /// the constructor is "named for its one legitimate source rather than for
+    /// its argument type", which makes a wrong call site read wrongly rather
+    /// than fail to build.
+    ///
+    /// What actually keeps a clock out of this parameter today:
+    ///
+    /// - **`clippy.toml`**, which bans the types `std::time::SystemTime` and
+    ///   `std::time::Instant` and the methods `jiff::Timestamp::now`,
+    ///   `jiff::Zoned::now` and `jiff::tz::TimeZone::system`/`try_system`
+    ///   workspace-wide. Escaping one is an `#[allow]` with a comment, which
+    ///   is visible in review.
+    /// - **`vibe-check-host`'s `clock` module**, the single sanctioned
+    ///   wall-clock read, holding the workspace's only such `#[allow]`.
+    ///   Everything it produces is display-only and outside `verdict_digest`.
+    /// - **`tests/no_wall_clock_in_the_model.rs`**, which asserts this crate
+    ///   reads no clock at all, including a `fn now` it declared itself.
+    ///
+    /// **Not yet enforced:** nothing stops a caller in another crate from
+    /// composing that module's `Clock` into `from_committer_date`, because
+    /// neither of the two names involved is banned and no test reads call
+    /// sites outside this crate. There is no `Vcs` implementation in the
+    /// workspace yet, so there is no such call site to guard; the milestone
+    /// that writes one owns closing this, and the fail-closed answer for the
+    /// case where it *cannot* read a date is already here as
+    /// [`UnverifiedReason::DecisionTimeUnavailable`].
+    ///
+    /// It stays a parameter rather than a field on [`Resolutions`] or on
+    /// [`Adjudicators`] because there is one caller that legitimately has *no*
+    /// committer date — the internal-panic path, which builds an
+    /// [`Adjudicators`] precisely when the run fell over before obtaining one.
+    /// A field there would have to be fabricated, which is the hole
+    /// [`DecisionTime`](crate::time::DecisionTime) exists to close.
+    ///
+    /// The expiry comparison is deliberately not exposed as a predicate on
+    /// [`SkipReason`]: this function is the single consumer of a resolution,
+    /// and a public "is this waiver dead?" is a second consumer waiting for a
+    /// caller.
     ///
     /// `pub(crate)`, not `pub`. This accounts *one* resolution, so a caller that
     /// could reach it could account a whole set in an order of its choosing —
@@ -564,11 +714,13 @@ impl CapabilityResolution {
         &self,
         requirement: &RequirementId,
         enforcement: Enforcement,
+        at: DecisionTime,
         adjudicators: &mut Adjudicators,
     ) {
-        // The routing rule, and the only line of this function that is new. An
-        // unknown identifier is a fact about the policy; policy integrity is
-        // never advisory, whatever the requirement asked for.
+        // The routing rule. An unknown identifier is a fact about the policy
+        // and a missing committer date is a fact about the run; neither is a
+        // result about the code, and neither may be routed to a ledger nothing
+        // enforces, whatever the requirement asked for.
         let lane = if self.is_policy_integrity() {
             Enforcement::Enforcing
         } else {
@@ -623,12 +775,44 @@ impl CapabilityResolution {
                     reason: why,
                     owner,
                     expires,
-                } => adjudicator.escalate(
-                    Tier::T1,
-                    ReasonCode::DeclaredSkip,
-                    format!("waived by {policy_ref} ({why}); owner {owner}, expires {expires}"),
-                    evidence_ref,
-                ),
+                } => {
+                    // Date-to-date, and strict. The waiver's granularity is a
+                    // day — `expires` is a civil date, not an instant — so the
+                    // committer timestamp is reduced to its UTC civil date
+                    // before the two are compared, and the waiver is live
+                    // through the whole of the day it names. Strictness is the
+                    // sense the ledger message beside it already implies:
+                    // "expires 2027-01-01" reads as good on that day.
+                    //
+                    // Exactly one escalation on either side of the boundary.
+                    // Two would put two rows in a ledger that is a bundle
+                    // field, for one requirement, which is not what the
+                    // ordering guarantees downstream are stated over.
+                    let decision = at.utc_date();
+                    if decision > *expires {
+                        adjudicator.escalate(
+                            Tier::TOP,
+                            ReasonCode::ExpiredSkip,
+                            format!(
+                                "waived by {policy_ref} ({why}); owner {owner}. \
+                                 That waiver lapsed on {expires} and this commit is \
+                                 dated {decision}; an expired waiver authorises \
+                                 nothing. Renew it or answer the capability."
+                            ),
+                            evidence_ref,
+                        );
+                    } else {
+                        adjudicator.escalate(
+                            Tier::T1,
+                            ReasonCode::DeclaredSkip,
+                            format!(
+                                "waived by {policy_ref} ({why}); owner {owner}, \
+                                 expires {expires}"
+                            ),
+                            evidence_ref,
+                        );
+                    }
+                }
             },
             Self::Unverified { reason } => adjudicator.escalate(
                 Tier::TOP,
@@ -720,9 +904,18 @@ impl Resolutions {
     /// subsequence of one strictly increasing [`RequirementId`] sequence.
     /// There is no second mechanism for the advisory ledger to fall out of step
     /// with, because there is no second mechanism.
-    pub fn account_into(&self, adjudicators: &mut Adjudicators) {
+    ///
+    /// # One decision time per evaluation, by construction
+    ///
+    /// `at` is the head commit's committer date, and it is forwarded unchanged
+    /// to every resolution in the walk. Waiver expiry is the decision that
+    /// reads it, and taking it once here rather than once per requirement means
+    /// two requirements in one run cannot be judged against two different
+    /// dates — the same reason the walk has one order rather than one per
+    /// caller.
+    pub fn account_into(&self, at: DecisionTime, adjudicators: &mut Adjudicators) {
         for (requirement, (enforcement, resolution)) in &self.0 {
-            resolution.account(requirement, *enforcement, adjudicators);
+            resolution.account(requirement, *enforcement, at, adjudicators);
         }
     }
 
@@ -772,6 +965,60 @@ mod tests {
             .expect("a well-formed fixture identifier")
     }
 
+    /// A decision time at midnight UTC on the given civil date.
+    ///
+    /// Every expiry assertion below is a statement about two civil dates, so
+    /// the fixture is written as one; the timestamp is an implementation
+    /// detail of getting there. `the_expiry_boundary_is_the_committer_dates_utc_date`
+    /// is the exception and builds its own, because the whole point of that
+    /// one is a time of day that straddles a zone boundary.
+    fn decision_at(year: i16, month: i8, day: i8) -> DecisionTime {
+        let at: Timestamp = Date::constant(year, month, day)
+            .to_zoned(jiff::tz::TimeZone::UTC)
+            .expect("a valid civil date at midnight UTC")
+            .timestamp();
+        DecisionTime::from_committer_date(at)
+    }
+
+    /// The waiver every expiry test below is written against.
+    fn waiver(expires: Date) -> CapabilityResolution {
+        CapabilityResolution::Skipped {
+            reason: SkipReason::Declared {
+                policy_ref: PolicyRef {
+                    path: ".vibe-check/policy.toml".into(),
+                    kind: "skip".into(),
+                    id: "macros-no-miri".into(),
+                    blob_sha: None,
+                },
+                reason: "proc-macro crate forbids unsafe".into(),
+                owner: "@kono/platform".into(),
+                expires,
+            },
+        }
+    }
+
+    /// The single escalation `resolution` produces on the enforcing lane.
+    fn only_escalation(
+        resolution: &CapabilityResolution,
+        at: DecisionTime,
+    ) -> crate::adjudicate::Escalation {
+        let mut adjudicators = Adjudicators::new();
+        resolution.account(
+            &requirement(),
+            Enforcement::Enforcing,
+            at,
+            &mut adjudicators,
+        );
+        let mut escalations = adjudicators.finish().0.into_adjudication().escalations;
+        assert_eq!(
+            escalations.len(),
+            1,
+            "one requirement contributes one ledger row, whichever side of the \
+             expiry boundary it fell on"
+        );
+        escalations.remove(0)
+    }
+
     fn evidence_with(provenance: Provenance) -> Box<Evidence> {
         Box::new(Evidence::from_parsed(
             ParsedEvidence::new(
@@ -793,17 +1040,41 @@ mod tests {
         })
     }
 
+    /// The decision time the resolutions that carry no date are accounted at.
+    ///
+    /// Only the two waiver rows of `account`'s table read it, so every other
+    /// test here is indifferent to its value.
+    fn some_decision_time() -> DecisionTime {
+        decision_at(2026, 3, 4)
+    }
+
     /// The two tiers this resolution produces under `enforcement`.
     fn tiers_of(resolution: &CapabilityResolution, enforcement: Enforcement) -> (Tier, Tier) {
+        tiers_of_at(resolution, enforcement, some_decision_time())
+    }
+
+    fn tiers_of_at(
+        resolution: &CapabilityResolution,
+        enforcement: Enforcement,
+        at: DecisionTime,
+    ) -> (Tier, Tier) {
         let mut adjudicators = Adjudicators::new();
-        resolution.account(&requirement(), enforcement, &mut adjudicators);
+        resolution.account(&requirement(), enforcement, at, &mut adjudicators);
         let (enforced, advisory) = adjudicators.finish();
         (enforced.tier(), advisory.tier())
     }
 
     fn verdict_of(resolution: &CapabilityResolution, enforcement: Enforcement) -> Verdict {
+        verdict_of_at(resolution, enforcement, some_decision_time())
+    }
+
+    fn verdict_of_at(
+        resolution: &CapabilityResolution,
+        enforcement: Enforcement,
+        at: DecisionTime,
+    ) -> Verdict {
         let mut adjudicators = Adjudicators::new();
-        resolution.account(&requirement(), enforcement, &mut adjudicators);
+        resolution.account(&requirement(), enforcement, at, &mut adjudicators);
         adjudicators.finish().0.verdict()
     }
 
@@ -861,6 +1132,9 @@ mod tests {
                 id: "loom-json@1".into(),
             },
             UnverifiedReason::NoForge,
+            UnverifiedReason::DecisionTimeUnavailable {
+                detail: "shallow clone: head commit is grafted".into(),
+            },
             UnverifiedReason::SchemaTooNew {
                 found: 9,
                 supported: 1,
@@ -941,24 +1215,175 @@ mod tests {
         };
         assert_eq!(verdict_of(&derived, Enforcement::Enforcing), Verdict::Auto);
 
-        let declared = CapabilityResolution::Skipped {
-            reason: SkipReason::Declared {
-                policy_ref: PolicyRef {
-                    path: ".vibe-check/policy.toml".into(),
-                    kind: "skip".into(),
-                    id: "macros-no-miri".into(),
-                    blob_sha: None,
-                },
-                reason: "proc-macro crate forbids unsafe".into(),
-                owner: "@kono/platform".into(),
-                expires: Date::constant(2027, 1, 1),
-            },
-        };
-        // A human waiver is reviewable, not free.
+        // A human waiver is reviewable, not free — and the decision time is
+        // named rather than left to a default, because `InterfaceReview` is the
+        // answer only while the waiver is live. Accounted a day after
+        // 2027-01-01 this same fixture is `Human`, and a test asserting
+        // `InterfaceReview` without saying when would be asserting the right
+        // thing for the wrong reason.
+        let declared = waiver(Date::constant(2027, 1, 1));
         assert_eq!(
-            verdict_of(&declared, Enforcement::Enforcing),
+            verdict_of_at(&declared, Enforcement::Enforcing, decision_at(2026, 6, 1)),
             Verdict::InterfaceReview
         );
+    }
+
+    #[test]
+    fn an_expired_waiver_costs_more_than_a_live_one() {
+        // The defect this pair exists for: `expires` used to be interpolated
+        // into a message and compared against nothing, so a waiver three years
+        // dead and one written yesterday produced the same tier, the same
+        // reason code, and the same verdict.
+        let declared = waiver(Date::constant(2027, 1, 1));
+
+        let live = decision_at(2026, 6, 1);
+        let expired = decision_at(2027, 6, 1);
+
+        assert_eq!(
+            verdict_of_at(&declared, Enforcement::Enforcing, live),
+            Verdict::InterfaceReview
+        );
+        assert_eq!(
+            verdict_of_at(&declared, Enforcement::Enforcing, expired),
+            Verdict::Human,
+            "an expired waiver authorises nothing, so the capability is \
+             unanswered and a human has to look"
+        );
+
+        // Both halves matter. The verdict is what an exit code derives from;
+        // the reason code is what a maintainer reads to find out that renewing
+        // the waiver — rather than answering the capability — is the cheap fix.
+        assert_eq!(
+            only_escalation(&declared, live).reason,
+            ReasonCode::DeclaredSkip
+        );
+        let escalated = only_escalation(&declared, expired);
+        assert_eq!(escalated.reason, ReasonCode::ExpiredSkip);
+        assert_eq!(escalated.to, Tier::TOP);
+        assert!(
+            escalated.detail.contains("2027-01-01") && escalated.detail.contains("2027-06-01"),
+            "the message names both the expiry and the commit's date: {}",
+            escalated.detail
+        );
+    }
+
+    #[test]
+    fn expiry_is_measured_against_the_committer_date_and_not_the_wall_clock() {
+        // The load-bearing one, and it is written so that no clock-reading
+        // implementation can pass it in either direction.
+        //
+        // A waiver that lapsed in 2020, evaluated at a decision time in 2019,
+        // is live — under any wall clock this machine will ever have, it is
+        // unconditionally dead. Re-running a three-year-old pull request has to
+        // give the verdict it had, or the replay property is prose.
+        let ancient = waiver(Date::constant(2020, 1, 1));
+        assert_eq!(
+            verdict_of_at(&ancient, Enforcement::Enforcing, decision_at(2019, 6, 1)),
+            Verdict::InterfaceReview,
+            "the committer date is 2019, and in 2019 this waiver had six months left"
+        );
+
+        // The mirror, which a "clock, but clamped" implementation still fails:
+        // a waiver good until 2099, evaluated at a decision time in 2100, is
+        // expired. No wall clock reaches 2100.
+        let distant = waiver(Date::constant(2099, 1, 1));
+        assert_eq!(
+            verdict_of_at(&distant, Enforcement::Enforcing, decision_at(2100, 1, 1)),
+            Verdict::Human,
+            "the committer date is 2100, and by 2100 this waiver is a year dead"
+        );
+    }
+
+    #[test]
+    fn the_expiry_boundary_is_the_committer_dates_utc_date() {
+        // A commit half an hour before midnight UTC on the expiry day. In UTC
+        // that is 2026-12-31 and the waiver is live; a runner at UTC+13 would
+        // call the same instant 2027-01-01 and, on a `>=` reading, kill it.
+        // Pinning the accessor to UTC is what makes one commit have one date.
+        //
+        // No `TZ` mutation to demonstrate the second runner: the environment is
+        // process-global and these tests run in one process. The assertion is
+        // that the outcome follows from the *UTC* date, which is a claim about
+        // this code and not about the machine running it.
+        let at: Timestamp = "2026-12-31T23:30:00Z"
+            .parse()
+            .expect("a well-formed fixture timestamp");
+        let decision = DecisionTime::from_committer_date(at);
+        assert_eq!(decision.utc_date(), Date::constant(2026, 12, 31));
+
+        let declared = waiver(Date::constant(2026, 12, 31));
+        assert_eq!(
+            verdict_of_at(&declared, Enforcement::Enforcing, decision),
+            Verdict::InterfaceReview,
+            "the UTC date is still the expiry day, so the waiver is still live"
+        );
+        assert_eq!(
+            only_escalation(&declared, decision).reason,
+            ReasonCode::DeclaredSkip
+        );
+    }
+
+    #[test]
+    fn the_expiry_boundary_is_inclusive_of_the_expiry_day() {
+        // Named for the answer so that a later refactor cannot flip `>` to `>=`
+        // and stay green. The ledger message renders "expires 2027-01-01",
+        // which a reader takes to mean the waiver is good on that day; the
+        // comparison must agree with the sentence printed beside it.
+        let declared = waiver(Date::constant(2027, 1, 1));
+
+        assert_eq!(
+            only_escalation(&declared, decision_at(2027, 1, 1)).reason,
+            ReasonCode::DeclaredSkip,
+            "on the expiry day itself the waiver is live"
+        );
+        assert_eq!(
+            only_escalation(&declared, decision_at(2027, 1, 2)).reason,
+            ReasonCode::ExpiredSkip,
+            "and the day after, it is not"
+        );
+    }
+
+    #[test]
+    fn an_expired_waiver_is_still_a_result_and_not_a_policy_fact() {
+        // Expiry raises the tier; it does not change the lane. An expired
+        // waiver is a fact about *this change* — a capability nobody answered
+        // and nobody is authorised to leave unanswered — not a fact about the
+        // policy document, so `enforcement = "advisory"` still routes it to the
+        // advisory ledger and the enforced tier does not move.
+        //
+        // The alternative was to route it like policy integrity, on the
+        // argument that a lapsed date is a defect in the policy. It was
+        // rejected: `is_policy_integrity` is for requirements this build cannot
+        // evaluate at all, and widening it to cover a waiver the policy author
+        // dated correctly and then let run out would make `advisory` mean
+        // something different for one skip variant than for every other
+        // resolution. This test is what a later "hardening" of
+        // `is_policy_integrity` — splitting its `Skipped` arm — would have to
+        // break in order to land.
+        let declared = waiver(Date::constant(2027, 1, 1));
+        let expired = decision_at(2027, 6, 1);
+
+        let (enforced, advisory) = tiers_of_at(&declared, Enforcement::Advisory, expired);
+        assert_eq!(
+            enforced,
+            Tier::BOTTOM,
+            "an advisory requirement cannot move the enforced tier, expired or not"
+        );
+        assert_eq!(advisory, Tier::TOP, "and the advisory ledger records it");
+
+        // The reason code travels with it, so the advisory ledger says *why*
+        // rather than only that something happened.
+        let mut adjudicators = Adjudicators::new();
+        declared.account(
+            &requirement(),
+            Enforcement::Advisory,
+            expired,
+            &mut adjudicators,
+        );
+        let escalations = adjudicators.finish().1.into_escalations();
+        assert_eq!(escalations.len(), 1);
+        assert_eq!(escalations[0].reason, ReasonCode::ExpiredSkip);
+        assert_eq!(escalations[0].to, Tier::TOP);
     }
 
     #[test]
@@ -1032,6 +1457,101 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn a_run_that_cannot_read_the_committer_date_escalates_the_enforced_ledger_whatever_the_lane_says()
+     {
+        // #32's third decision, as a property rather than a promise: *if
+        // `committer_date` is unavailable, escalate to `TOP`. Never "assume
+        // live".*
+        //
+        // The lane matters as much as the tier. Without the override, a
+        // requirement carrying `enforcement = "advisory"` would put "we could
+        // not date any waiver on this run" into a ledger nothing enforces, and
+        // the enforced verdict would come out `auto` — which is "assume live"
+        // reached by a different door, and it is the door that does not look
+        // like a fail-open while you are writing it.
+        let reason = UnverifiedReason::DecisionTimeUnavailable {
+            detail: "shallow clone: head commit is grafted".into(),
+        };
+        assert!(reason.is_policy_integrity(), "{reason:?}");
+
+        for enforcement in [Enforcement::Enforcing, Enforcement::Advisory] {
+            let resolution = CapabilityResolution::Unverified {
+                reason: reason.clone(),
+            };
+            let (enforced, advisory) = tiers_of(&resolution, enforcement);
+            assert_eq!(
+                enforced,
+                Tier::TOP,
+                "under {enforcement:?} a missing decision time must escalate the \
+                 enforced tier"
+            );
+            assert_eq!(
+                enforced.verdict(),
+                Verdict::Human,
+                "under {enforcement:?} a missing decision time must demand a human"
+            );
+            assert_eq!(
+                advisory,
+                Tier::BOTTOM,
+                "under {enforcement:?} it must not be routed to the advisory ledger \
+                 at all"
+            );
+        }
+    }
+
+    #[test]
+    fn a_missing_decision_time_is_told_apart_from_every_other_unverified_reason() {
+        // It gets a reason code of its own rather than sharing
+        // `CapabilityUnverified` with the ten variants that fall through to it.
+        // Two things depend on that. The escape-rate loop groups history by
+        // reason code, so "the checkout was wrong" and "the evidence was
+        // wrong" have to be countable apart — they have different fixes and
+        // one of them is not about the code at all. And a maintainer reading
+        // the ledger needs to be told that repairing the clone, not answering
+        // the capability, is what clears this.
+        let missing = UnverifiedReason::DecisionTimeUnavailable {
+            detail: "shallow clone: head commit is grafted".into(),
+        };
+        assert_eq!(
+            missing.reason_code(),
+            ReasonCode::DecisionTimeUnavailable,
+            "it does not fall through to the catch-all"
+        );
+
+        // Distinct from the two it is routed alongside, so that widening
+        // `is_policy_integrity` did not make the three indistinguishable
+        // downstream, and distinct from the nearest result-shaped neighbours.
+        for other in [
+            UnverifiedReason::UnknownCapability {
+                id: "tetss-pass".into(),
+            },
+            UnverifiedReason::UnknownParser {
+                id: "junti@1".into(),
+            },
+            UnverifiedReason::MissingEvidence,
+            UnverifiedReason::NoForge,
+            UnverifiedReason::ExecutionFailed {
+                detail: "git not on PATH".into(),
+            },
+        ] {
+            assert_ne!(
+                missing.reason_code(),
+                other.reason_code(),
+                "{other:?} must not group with a missing decision time"
+            );
+        }
+
+        // The message has to name the cause; "not implemented" without a next
+        // step leaves a maintainer guessing what they misconfigured.
+        let detail = missing.detail();
+        assert!(detail.contains("committer date"), "{detail}");
+        assert!(
+            detail.contains("shallow clone: head commit is grafted"),
+            "the underlying failure survives into the ledger: {detail}"
+        );
     }
 
     #[test]

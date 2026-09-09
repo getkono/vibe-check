@@ -113,10 +113,16 @@ The rules, all applied in one place:
   declaration masquerading as a measurement is the cheapest possible way to fake
   a pass, so `account` checks `Provenance::is_measured` before it looks at the
   judgement at all.
-- **A derived skip is free; a policy-declared waiver costs `Tier::T1`.** Nobody
-  made a judgement call in the first case. In the second a human did, and a
-  change riding on a human's waiver is precisely the change that should not
-  merge unattended.
+- **A derived skip is free; a live policy-declared waiver costs `Tier::T1`; an
+  expired one costs `Tier::TOP`.** Nobody made a judgement call in the first
+  case. In the second a human did, and a change riding on a human's waiver is
+  precisely the change that should not merge unattended. In the third the human
+  wrote down a date and that date has passed, so there is no authorisation left
+  to ride on — the waiver escalates with `ReasonCode::ExpiredSkip` rather than
+  `DeclaredSkip`, exactly one escalation either way. Expiry is decided against
+  the head commit's committer date (`DecisionTime`, threaded in through
+  `account_into`), never the wall clock, and the waiver is live through the
+  whole of the day it names.
 
 Enforcing file: `crates/vibe-check-model/src/resolution.rs`.
 `CapabilityResolution::account` is the **single consumer** of a resolution, so
@@ -192,8 +198,20 @@ Three parts:
 
 1. **Same diff plus same policy yields the same verdict.**
 2. **Time-dependent *decisions* read the head commit's committer date, never the
-   wall clock.** Waiver expiry and artifact freshness compare against it, so
-   re-evaluating last month's pull request gives the verdict it had.
+   wall clock.** Waiver expiry is the one decision that compares against it
+   today, so re-evaluating last month's pull request gives the verdict it had.
+   Artifact freshness is **not** a second one: `UnverifiedReason::StaleArtifact`
+   compares the commit an artifact was produced from against the commit we
+   needed, and reads no date at all. It is named here as an example of the rule
+   in `clippy.toml`'s lint reason, which is a rule for the code that gets
+   written next rather than a description of code that exists.
+   `UnverifiedReason::DecisionTimeUnavailable` is the variant a run that cannot
+   obtain the committer date escalates through, to `Tier::TOP` on the enforced
+   ledger rather than assuming a time — but **nothing constructs one yet**, so
+   this is the shape the answer will take rather than behaviour you can observe
+   today. Enforcement lands with the caller that reads the committer date and
+   has to say it could not; `crates/vibe-check-model/src/resolution.rs` says so
+   at the variant.
 3. **Iteration order never reaches a digest or a bundle.**
 
 Enforced prophylactically by `clippy.toml`, which bans `HashMap` and `HashSet`
@@ -310,18 +328,27 @@ what it is for.
 
 ## 9. Quality gates
 
-`mise run check` is the gate. It is exactly four tasks, in order:
+`mise run check` is the gate. It is this task list, in this order:
 
 ```bash
 mise run format-check  # cargo fmt --all --check
 mise run lint          # cargo clippy --workspace --all-targets --all-features -- -D warnings
-mise run lint-actions  # actionlint
+mise run lint-actions  # actionlint, shellcheck, and lint-action-surface
+mise run lint-deny     # cargo deny check bans
 mise run test          # cargo test --workspace --all-targets --all-features
 ```
 
-CI runs `mise run check` verbatim (`.github/workflows/ci.yml:41`) rather than
-spelling the cargo invocations out again, because duplicating them is how CI and
-the hooks drift apart.
+The list is the contract, not its length: `lint-actions` is itself three
+commands, so counting tasks was never the same as counting what runs. Read the
+`[tasks.check]` array in `mise.toml` for what is actually gated.
+
+CI runs `mise run check` verbatim (the `Check` step in
+`.github/workflows/ci.yml`) rather than spelling the cargo invocations out
+again, because duplicating them is how CI and the hooks drift apart. The step is
+named rather than cited by line, because a line number here goes stale on the
+next edit to that file — this change moved it once already — and a stale
+citation in this contract reads as a claim about a line that now says something
+else.
 
 `hk.pkl` routes through the **same** `mise` task interface, but it does not call
 `check`. It calls the leaf tasks:
@@ -332,8 +359,16 @@ the hooks drift apart.
 - **pre-push** — `format-check`, `lint`, `test`, then `commits`
   (`convco check origin/master..HEAD`).
 
-**`lint-actions` is CI-only.** A change to a workflow YAML file passes pre-push
-and can still fail CI. Run `mise run check` yourself before pushing one.
+**`lint-actions` and `lint-deny` are CI-only.** A change to a workflow YAML
+file, or one that moves the dependency graph, passes pre-push and can still fail
+CI. Run `mise run check` yourself before pushing one.
+
+That split is also what keeps `lint-deny` affordable. `cargo deny check bans`
+resolves the graph through `cargo metadata` rather than reading `Cargo.lock` as
+text, so it wants a warm registry cache or a network — and because pre-push
+calls the leaf tasks and never `check`, the only place that requirement lands is
+a CI runner that has both. The hermetic rule below is about the pre-push hook;
+moving `lint-deny` onto that hook is what would break it.
 
 Enforcing files: `mise.toml`, `.github/workflows/ci.yml`, `hk.pkl`.
 
