@@ -29,9 +29,11 @@ edition      = "2024"
 # higher of them:
 #
 #   * Our own source floor is 1.91. `crates/vibe-check/src/panic.rs:173` calls
-#     `PanicHookInfo::payload_as_str()`, stabilized in 1.91; at 1.90 the
-#     workspace stops at `error[E0658]: use of unstable library feature
-#     'panic_payload_as_str'`, and that one line is the whole of it.
+#     `PanicHookInfo::payload_as_str()`, stabilized in 1.91; at 1.90 with
+#     `--ignore-rust-version` the workspace stops at `error[E0658]: use of
+#     unstable library feature 'panic_payload_as_str'`, and that one line is
+#     the whole of it. The flag is needed to see it: without it the karet
+#     floor below rejects 1.90 first and no compiler ever runs.
 #   * `karet-core` and `karet-vcs` 0.6.0 both declare `rust-version = "1.92"`.
 #     That is a declaration rather than a compile error — pass
 #     `--ignore-rust-version` and 1.91 builds the tree clean — but cargo
@@ -52,10 +54,11 @@ edition      = "2024"
 # differ now that each says something true.
 #
 # This is the "make the claim true" branch of #94, and the half that keeps it
-# true is in CI: the `msrv` job in `.github/workflows/ci.yml` runs
-# `cargo check --workspace --all-targets --all-features` at this exact number
-# on every run of the workflow, alongside the `quality` job that runs at the
-# pin. A stated MSRV that nothing exercises is a promise nobody tests, which is
+# true is in CI: the `msrv` job in `.github/workflows/ci.yml` reads this line
+# and runs `cargo check --workspace --all-targets --all-features` at whatever
+# it says, on every run of the workflow, alongside the `quality` job that runs
+# at the pin. It reads the number rather than repeating it so that lowering
+# this line cannot leave the job testing the old one. A stated MSRV that nothing exercises is a promise nobody tests, which is
 # the defect #94 was filed about; raising the real floor now fails that job on
 # the pull request that raised it rather than drifting silently. If it fails,
 # move this number and say what moved it — do not widen the job.
