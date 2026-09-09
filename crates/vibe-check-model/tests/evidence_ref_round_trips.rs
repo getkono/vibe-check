@@ -36,9 +36,21 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use vibe_check_model::{
-    Adjudicators, CapabilityId, CapabilityResolution, Enforcement, EvidenceRef, PolicyRef,
-    RequirementId, Resolutions, UnverifiedReason,
+    Adjudicators, CapabilityId, CapabilityResolution, DecisionTime, Enforcement, EvidenceRef,
+    PolicyRef, RequirementId, Resolutions, UnverifiedReason,
 };
+
+/// The decision time the ledger below is accounted at.
+///
+/// Waiver expiry is the only decision that reads one, and the fixture here
+/// resolves `Unverified`, so the value cannot reach the bytes being asserted.
+fn decision_time() -> DecisionTime {
+    DecisionTime::from_committer_date(
+        "2026-06-01T00:00:00Z"
+            .parse()
+            .expect("a well-formed fixture timestamp"),
+    )
+}
 
 /// The one variant the workspace constructs outside a test, byte for byte.
 ///
@@ -187,7 +199,7 @@ fn an_escalation_ledger_reaches_json() {
     );
     assert!(displaced.is_none());
     let mut adjudicators = Adjudicators::new();
-    resolutions.account_into(&mut adjudicators);
+    resolutions.account_into(decision_time(), &mut adjudicators);
     let ledger = adjudicators.finish().0.into_adjudication().escalations;
     assert_eq!(ledger.len(), 1);
 

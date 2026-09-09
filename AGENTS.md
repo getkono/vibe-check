@@ -113,10 +113,16 @@ The rules, all applied in one place:
   declaration masquerading as a measurement is the cheapest possible way to fake
   a pass, so `account` checks `Provenance::is_measured` before it looks at the
   judgement at all.
-- **A derived skip is free; a policy-declared waiver costs `Tier::T1`.** Nobody
-  made a judgement call in the first case. In the second a human did, and a
-  change riding on a human's waiver is precisely the change that should not
-  merge unattended.
+- **A derived skip is free; a live policy-declared waiver costs `Tier::T1`; an
+  expired one costs `Tier::TOP`.** Nobody made a judgement call in the first
+  case. In the second a human did, and a change riding on a human's waiver is
+  precisely the change that should not merge unattended. In the third the human
+  wrote down a date and that date has passed, so there is no authorisation left
+  to ride on — the waiver escalates with `ReasonCode::ExpiredSkip` rather than
+  `DeclaredSkip`, exactly one escalation either way. Expiry is decided against
+  the head commit's committer date (`DecisionTime`, threaded in through
+  `account_into`), never the wall clock, and the waiver is live through the
+  whole of the day it names.
 
 Enforcing file: `crates/vibe-check-model/src/resolution.rs`.
 `CapabilityResolution::account` is the **single consumer** of a resolution, so
@@ -192,8 +198,20 @@ Three parts:
 
 1. **Same diff plus same policy yields the same verdict.**
 2. **Time-dependent *decisions* read the head commit's committer date, never the
-   wall clock.** Waiver expiry and artifact freshness compare against it, so
-   re-evaluating last month's pull request gives the verdict it had.
+   wall clock.** Waiver expiry is the one decision that compares against it
+   today, so re-evaluating last month's pull request gives the verdict it had.
+   Artifact freshness is **not** a second one: `UnverifiedReason::StaleArtifact`
+   compares the commit an artifact was produced from against the commit we
+   needed, and reads no date at all. It is named here as an example of the rule
+   in `clippy.toml`'s lint reason, which is a rule for the code that gets
+   written next rather than a description of code that exists.
+   `UnverifiedReason::DecisionTimeUnavailable` is the variant a run that cannot
+   obtain the committer date escalates through, to `Tier::TOP` on the enforced
+   ledger rather than assuming a time — but **nothing constructs one yet**, so
+   this is the shape the answer will take rather than behaviour you can observe
+   today. Enforcement lands with the caller that reads the committer date and
+   has to say it could not; `crates/vibe-check-model/src/resolution.rs` says so
+   at the variant.
 3. **Iteration order never reaches a digest or a bundle.**
 
 Enforced prophylactically by `clippy.toml`, which bans `HashMap` and `HashSet`

@@ -270,6 +270,7 @@ mod tests {
     use crate::known::{Known, UnknownKind};
     use crate::reason::{EvidenceRef, PolicyRef, ReasonCode};
     use crate::resolution::{CapabilityResolution, Judgement, SkipReason, UnverifiedReason};
+    use crate::time::DecisionTime;
     use jiff::Timestamp;
     use jiff::civil::Date;
     use proptest::prelude::*;
@@ -338,10 +339,32 @@ mod tests {
         prop_oneof![Just(Enforcement::Enforcing), Just(Enforcement::Advisory)]
     }
 
+    /// The decision time every fixture here is accounted at.
+    ///
+    /// Deliberately *before* the `2027-01-01` expiry on the waiver in
+    /// `any_non_integrity_resolution`, so that arm keeps escalating `Tier::T1`
+    /// and the strategy's "nothing, `T1`, and `TOP`" claim stays true. Move it
+    /// past that date and the waiver arm becomes a second `TOP`, quietly
+    /// deleting the only `T1` these properties range over — the strategy would
+    /// still generate five resolutions and the comment would still say three
+    /// outcomes, while two of the three were the same one.
+    fn decision_time() -> DecisionTime {
+        DecisionTime::from_committer_date(
+            "2026-06-01T00:00:00Z"
+                .parse()
+                .expect("a well-formed fixture timestamp"),
+        )
+    }
+
     fn account_all(pairs: &[(CapabilityResolution, Enforcement)]) -> Adjudicators {
         let mut adjudicators = Adjudicators::new();
         for (resolution, enforcement) in pairs {
-            resolution.account(&requirement(), *enforcement, &mut adjudicators);
+            resolution.account(
+                &requirement(),
+                *enforcement,
+                decision_time(),
+                &mut adjudicators,
+            );
         }
         adjudicators
     }

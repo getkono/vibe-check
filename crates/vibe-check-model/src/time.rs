@@ -49,6 +49,21 @@ use jiff::{Timestamp, civil::Date, tz::TimeZone};
 /// If one of these appears useful, the thing that is actually needed is a
 /// committer date threaded further down — not a shorter path to a clock.
 ///
+/// # Who reads one
+///
+/// `Resolutions::account_into` takes one and forwards it unchanged to every
+/// resolution it accounts, which makes "one decision time per evaluation" true
+/// by construction rather than by convention. The decision that reads it is
+/// waiver expiry: `CapabilityResolution::account` compares a
+/// `SkipReason::Declared`'s `expires` against [`utc_date`](Self::utc_date), so
+/// a waiver that was live when the pull request was opened is still live when
+/// CI re-runs it a month later.
+///
+/// That is a comparison between two civil dates, not two instants, which is
+/// why [`utc_date`](Self::utc_date) is the only accessor: a waiver's
+/// granularity is a day, and the type declines to offer a finer one that
+/// nothing is entitled to use.
+///
 /// # Why the accessor is UTC
 ///
 /// [`utc_date`](DecisionTime::utc_date) pins the civil date to UTC rather than
