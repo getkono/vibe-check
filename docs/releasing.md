@@ -179,15 +179,39 @@ the queue, but because it would be enforcement in name only. Wanting commit
 messages enforced in the queue lane means building a check that is genuinely
 `merge_group`-aware, resolving the commit range some other way when there is
 no base ref to read; that resolution is #11's own unbuilt ladder work, not a
-toggle. This composes with #62 (any required check on `master` starts
-failing the promote job's direct `dist/` push, above) and #102 (that push's
-commit already carries zero check runs, independent of this decision, and
-matters more once `master` is protected).
+toggle.
+
+**Second cost, and the one that bites first:** enabling the queue breaks the
+release chain's direct push, on its own, before #62 is reached. "Require merge
+queue" cannot be enabled without "Require a pull request before merging", and
+that setting alone rejects `git push origin HEAD:master` — which is exactly
+what the promote job does at `.github/workflows/release-binaries.yml`. That
+file's own comment ("master carries no branch protection and no ruleset, so the
+built-in token can push") becomes false at the moment the queue is switched on,
+not later when a check is added. The fallback is above, under "If master
+becomes protected"; it has to be in place *before* #115 is executed, or the
+next release fails at the push step with the cause recorded against a different
+decision. #62 and #102 compound this — #102's push already carries zero check
+runs — but neither is required for it to happen.
+
+**Third cost: CI spend roughly doubles per pull request.** Every change now
+runs `Quality` twice, once on `pull_request` and once on `merge_group`, each a
+full `cargo test --workspace --all-targets --all-features` over a
+`fetch-depth: 0` checkout. Actions caches written on a `gh-readonly-queue/*`
+ref are scoped to that ephemeral branch and discarded, so the queue lane can
+read master's `rust-cache` entry but never improves it, and the second run is
+the one most likely to be cold. That is the price of not serialising humans
+behind a re-run, and it is worth paying at this repository's cadence — but it
+is a recurring cost rather than a one-off, and #93 asks for the decision to be
+recorded with its cost.
 
 **What remains, and cannot be done from this repository's code:** branch
 protection on `master` requiring the `Quality` check, "Require merge queue"
 enabled, and "Require branches to be up to date before merging" left off
-(the queue already guarantees that). Tracked as #93.
+(the queue already guarantees that). The settings flip itself is #115, which
+carries the checklist and the verified before-state; #93 is the analysis and
+stays open until the queue is live and one pull request has drained through it.
+Do not execute #115 before the promote job's fallback above is in place.
 
 ## What the digest does and does not protect against
 
