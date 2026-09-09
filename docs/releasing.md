@@ -62,8 +62,9 @@ a verdict to distribute. Pin `@v0.1.0` if you want stability now.
 
 - a change to `action.yml`'s input surface — frozen at `config-file` and
   `config-inline`, so in practice this never happens;
-- a change to the exit-code mapping in `crates/vibe-check/src/exit.rs`, which is
-  documented as a public interface. **This is the realistic `v2` trigger;**
+- a change to the exit-code mapping in `crates/vibe-check-cli/src/exit.rs`,
+  which is documented as a public interface. **This is the realistic `v2`
+  trigger;**
 - a breaking `BundleCore` change.
 
 `vN` never moves across a major boundary. `v1` and `v2` are separate tags that
@@ -104,22 +105,30 @@ Worth knowing before anything here is debugged, because the symptom is silence.
 `publish = false` skips `cargo publish` and nothing else. release-plz still asks
 the **cargo registry** what the latest released version of a package is — and
 `vibe-check` on crates.io is an unrelated project, published at 0.3.2 since
-March 2026. release-plz compared this workspace's 0.1.0 against that 0.3.2,
-concluded there was nothing to release, and exited **successfully** on every
-push to master for the life of this repository. No tag, no release, no
-version-bump pull request, and no error anywhere.
+March 2026. This workspace's binary package was called `vibe-check` then, so
+release-plz compared its 0.1.0 against that 0.3.2, concluded there was nothing
+to release, and exited **successfully** on every push to master for the life of
+this repository. No tag, no release, no version-bump pull request, and no error
+anywhere.
 
 `git_only = true` in `release-plz.toml` is the fix: versions come from git tags
 matching `git_tag_name`, and with no such tag present the package is an initial
-release.
+release. #98 then renamed the package to `vibe-check-cli`, which is available on
+crates.io and is a name this project owns, so the query that started all of this
+can no longer land on a stranger's crate.
 
 Two consequences that outlive the fix:
 
-- **`cargo install vibe-check` will never be a supported path**, and publishing
-  under that name is not available. Whatever #6 decides about crates.io, it
-  decides it about a *different* name. The distribution paths that remain are
-  the ones this document describes — the action, and a released binary via
-  `cargo binstall` or `mise use ubi:getkono/vibe-check`.
+- **`cargo install vibe-check` will never be a supported path.** That name is
+  somebody else's and typing it installs their tool. The package here is
+  `vibe-check-cli`; whether it is ever pushed to crates.io under that name is
+  #6's question, and `release-plz.toml` keeps `publish = false` until #6 answers
+  it. The distribution paths that exist today are the ones this document
+  describes — the action, and a released binary via
+  `mise use ubi:getkono/vibe-check`. `cargo binstall` is not one of them: it
+  resolves through crates.io as well, so it stays unavailable until #6. The two
+  `[[bin]]` names are unchanged by the rename: a user still types `vibe-check`
+  and `cargo vibe-check`.
 - **A green release job is not evidence that anything was released.** The one
   observable that means it is `gh release list` being non-empty, which is why
   the verification plan checks that rather than the job's conclusion.

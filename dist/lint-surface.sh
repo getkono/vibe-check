@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# The executable half of three claims that are otherwise only prose.
+# The executable half of four claims that are otherwise only prose.
 #
 # actionlint lints workflow files only: it has no mode for composite action
 # metadata and rejects action.yml outright as a malformed workflow. So the
@@ -54,6 +54,58 @@ if [ -f dist/RELEASE ] || [ -f dist/SHA256SUMS ]; then
       fail "dist/SHA256SUMS lists ${count} archives; the release matrix builds 5."
     fi
   fi
+fi
+
+# 4. Every `[[package]]` in release-plz.toml names a package that exists.
+#
+#    A name here that matches no package is a hard config error inside
+#    release-plz, raised on master after the merge — and nothing else in
+#    `mise run check` reads this file, so a rename that misses it is discovered
+#    only once the release chain is already broken. That is the failure class
+#    #96 and #99 exist to remove.
+#
+#    Read from the manifests rather than from `cargo metadata`, because this
+#    script is otherwise pure text linting and needs neither a toolchain nor a
+#    JSON parser to run. The two sets are the same set: `Cargo.toml` declares
+#    `members = ["crates/*"]`, so every workspace package is exactly one
+#    `crates/*/Cargo.toml`.
+manifest_names="$(for manifest in crates/*/Cargo.toml; do
+  awk -F'"' '
+    /^\[package\]/ { p = 1; next }
+    /^\[/          { p = 0 }
+    p && $0 ~ /^name[[:space:]]*=/ { print $2; exit }
+  ' "$manifest"
+done)"
+#    The comparison below is a loop over the names this awk yields, so a
+#    `[[package]]` section it reads nothing from is not a failure — it is an
+#    iteration that never happens. Dropping the `name` line from the section
+#    that tags and releases would therefore leave this check reporting success
+#    while checking that section not at all, which is the silent green #96
+#    exists to remove, reintroduced one layer down. Counting the sections and
+#    requiring a name from each is what makes a passing run mean something.
+package_sections="$(grep -c '^\[\[package\]\]' release-plz.toml || true)"
+declared_names="$(awk -F'"' '
+  /^\[\[package\]\]/ { p = 1; next }
+  /^\[/                { p = 0 }
+  p && $0 ~ /^name[[:space:]]*=/ { print $2 }
+' release-plz.toml)"
+declared_count="$(printf '%s' "$declared_names" | grep -c . || true)"
+if [ -z "$manifest_names" ]; then
+  fail "no package name could be read from any crates/*/Cargo.toml."
+elif [ "$package_sections" -eq 0 ]; then
+  # Never legitimately zero: release-plz.toml has to name the package that tags
+  # and releases, or there is no release chain for this script to be linting.
+  fail "release-plz.toml declares no [[package]] section."
+elif [ "$declared_count" -ne "$package_sections" ]; then
+  fail "release-plz.toml has ${package_sections} [[package]] section(s) but ${declared_count} readable name(s); a section without a name is never checked."
+else
+  while read -r declared; do
+    [ -n "$declared" ] || continue
+    printf '%s\n' "$manifest_names" | grep -qxF "$declared" ||
+      fail "release-plz.toml names package ${declared}, which no crates/*/Cargo.toml declares."
+  done <<EOF
+$declared_names
+EOF
 fi
 
 exit "$status"

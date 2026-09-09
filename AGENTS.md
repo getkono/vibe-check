@@ -35,7 +35,7 @@ invariant.
 
 **The DAG points one way.** `vibe-check-model` depends on nothing internal;
 `vibe-check-host` depends on the model; everything else depends on those two.
-`vibe-check` is link-time only — it holds the binaries and the registration
+`vibe-check-cli` is link-time only — it holds the binaries and the registration
 seam, and nothing depends on it.
 
 **`vibe-check-engine` must never gain a dependency on a concrete parser,
@@ -59,9 +59,9 @@ The five crates that exist today:
 - **`vibe-check-testkit`** — test doubles and fixture builders. A
   dev-dependency only, and the one crate where `unwrap`/`expect`/`panic` are
   allowed in library code.
-- **`vibe-check`** — the `vibe-check` and `cargo-vibe-check` binaries, the CLI,
-  the exit-code mapping, the local scheduler, and the registration seam in
-  `crates/vibe-check/src/assembly.rs`.
+- **`vibe-check-cli`** — the `vibe-check` and `cargo-vibe-check` binaries, the
+  CLI, the exit-code mapping, the local scheduler, and the registration seam in
+  `crates/vibe-check-cli/src/assembly.rs`.
 
 ## 2. Scrutiny only rises
 
@@ -238,14 +238,14 @@ only shape that date may take once it is inside the model, with no `now`, no
 `TZ` cannot move an expiry; `crates/vibe-check-host/src/clock.rs` — the
 sanctioned wall-clock exception, whose every field is display-only and therefore
 outside `verdict_digest`, which enumerates what it covers rather than what it
-drops; `crates/vibe-check/src/assembly.rs` and
+drops; `crates/vibe-check-cli/src/assembly.rs` and
 `crates/vibe-check-model/src/bundle.rs` — `BTreeSet` and `BTreeMap` in
 everything that reaches a digest; `crates/vibe-check-model/src/digest.rs` —
 RFC 8785 canonicalization and the two digests, whose path lists are data in one
 place so that what a digest covers can be read and tested as a set;
-`crates/vibe-check/src/scheduler.rs` — sorts completion order away, because how
-long each tool happened to take is not something anything downstream may depend
-on.
+`crates/vibe-check-cli/src/scheduler.rs` — sorts completion order away, because
+how long each tool happened to take is not something anything downstream may
+depend on.
 
 **Escaping one of these lints is `#[allow(clippy::disallowed_types)]` with a
 comment** naming the reason. That is deliberately visible in review, and #10
@@ -262,7 +262,7 @@ One gap, and one non-gap, stated plainly:
   (`crates/vibe-check-model/tests/golden/bundle.json`), so a canonicalization
   change fails visibly. What is still missing is the corpus: nothing in the
   workspace *writes* a bundle, one document is not a population, and
-  `vibe-check replay` is declared in `crates/vibe-check/src/cli.rs` and
+  `vibe-check replay` is declared in `crates/vibe-check-cli/src/cli.rs` and
   unimplemented. Enforcement lands with the milestone that writes the first
   bundle; until then determinism rests on the lints, the proptests, and that
   single golden.
@@ -313,7 +313,7 @@ two places**: a new file in the crate that implements it, and one line in
 `builtin()`. If your change needs a third edit site, the seam is in the wrong
 place, and that is worth fixing before the change lands.
 
-Enforcing file: `crates/vibe-check/src/assembly.rs`.
+Enforcing file: `crates/vibe-check-cli/src/assembly.rs`.
 
 The registry is **passed explicitly rather than reached through a global**, and
 attribute-based registration was rejected for reasons specific to this system:
@@ -322,7 +322,7 @@ own, so two registries must be alive at once; the registry digest goes into
 every bundle, and link order is unspecified; and capabilities declared in
 configuration cannot be registered at link time anyway.
 
-`crates/vibe-check/src/assembly.rs` currently carries a
+`crates/vibe-check-cli/src/assembly.rs` currently carries a
 `nothing_is_registered_yet` test. The first registration deletes it — that is
 what it is for.
 
@@ -375,7 +375,7 @@ Enforcing files: `mise.toml`, `.github/workflows/ci.yml`, `hk.pkl`.
 Standing rules:
 
 - Keep entry-point code thin and move behaviour into testable functions. The
-  binaries are wrappers over `run` in `crates/vibe-check/src/lib.rs`.
+  binaries are wrappers over `run` in `crates/vibe-check-cli/src/lib.rs`.
 - All public items need doc comments — `missing_docs` is `warn` workspace-wide.
 - Errors must carry actionable context. "Not implemented" without a next step
   leaves the reader wondering what they misconfigured.
@@ -385,8 +385,8 @@ Standing rules:
   anything reading an exit code. Library crates lift the ban under
   `#[cfg(test)]` and only there; `vibe-check-testkit` lifts it for its library
   code too, and says why in its own docs.
-- The exit-code contract lives in `crates/vibe-check/src/exit.rs`, next to the
-  tier it derives from. Do not restate the table anywhere else — `README.md`
+- The exit-code contract lives in `crates/vibe-check-cli/src/exit.rs`, next to
+  the tier it derives from. Do not restate the table anywhere else — `README.md`
   owns the user-facing version, and carries it (#14).
 
 Tests run hermetically and without network access, because they run on the
@@ -402,7 +402,7 @@ matters here:
 
 - **`tokio`** — the async runtime. `#[tokio::main]` on both binaries and
   `JoinSet` in `LocalScheduler`; features `rt-multi-thread`, `macros`,
-  `process`, `time`, `sync` (`crates/vibe-check/Cargo.toml`), of which
+  `process`, `time`, `sync` (`crates/vibe-check-cli/Cargo.toml`), of which
   `process`, `time`, and `sync` are all declared and not yet exercised. **There
   is no HTTP client in this workspace** — no `reqwest`, no `octocrab`, no
   `hyper`, so the forge traits have no network-backed implementation. The two

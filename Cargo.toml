@@ -10,7 +10,7 @@
 #       └─ …                                (diff, evidence, policy, capability,
 #                                             risk, engine — added per milestone)
 #     ......................................... link-time only .................
-#       vibe-check                          bins + `assembly.rs` registration
+#       vibe-check-cli                      bins + `assembly.rs` registration
 #
 # `vibe-check-engine` must never gain a dependency on a concrete parser,
 # analyzer, capability, probe, forge, or renderer. The crate does not exist yet,
@@ -28,8 +28,8 @@ edition      = "2024"
 # MEASURED, not asserted. Two separate floors were found, and cargo takes the
 # higher of them:
 #
-#   * Our own source floor is 1.91. `crates/vibe-check/src/panic.rs:173` calls
-#     `PanicHookInfo::payload_as_str()`, stabilized in 1.91; at 1.90 with
+#   * Our own source floor is 1.91. `crates/vibe-check-cli/src/panic.rs:173`
+#     calls `PanicHookInfo::payload_as_str()`, stabilized in 1.91; at 1.90 with
 #     `--ignore-rust-version` the workspace stops at `error[E0658]: use of
 #     unstable library feature 'panic_payload_as_str'`, and that one line is
 #     the whole of it. The flag is needed to see it: without it the karet

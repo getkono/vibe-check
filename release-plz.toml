@@ -16,14 +16,16 @@
 # crates in a group would be dead configuration: the inherited-version branch is
 # matched before the group is ever looked up, so the group would never be
 # consulted. It would not be harmless dead configuration either, because a name
-# in that list that no longer matches a crate is a hard config error, and
-# `mise run check` never reads this file.
+# in that list that no longer matches a crate is a hard config error, raised on
+# master after the merge. `dist/lint-surface.sh` checks the `[[package]]` names
+# below against the crate manifests; it does not know about `version_group`, so
+# a stale name in one would still reach release-plz unchallenged.
 #
 # Why one version is the right answer anyway, should the inheritance ever be
-# revisited: every crate is `publish = false`, the internal dependencies are
+# revisited: nothing here is on a registry, the internal dependencies are
 # path-only (`Cargo.toml`, `[workspace.dependencies]`), and exactly one package
-# ships anything — `vibe-check`, which produces two binaries, `vibe-check` and
-# `cargo-vibe-check`. An independent release cadence for crates nobody can
+# ships anything — `vibe-check-cli`, which produces two binaries, `vibe-check`
+# and `cargo-vibe-check`. An independent release cadence for crates nobody can
 # depend on independently buys nothing.
 #
 # Revisit alongside the crates.io decision (#6). If this workspace is ever
@@ -59,11 +61,16 @@ publish            = false
 #
 # This is load-bearing, and its absence was silent. `publish = false` only skips
 # `cargo publish`; release-plz still asked the registry what the latest release
-# of `vibe-check` was. That name belongs to an unrelated crate, published at
-# 0.3.2 — so release-plz compared our 0.1.0 against 0.3.2, concluded there was
-# nothing to release, and exited **successfully** on every push to master since
-# this repository existed. No tag, no release, no version-bump pull request, and
-# no error to notice.
+# of the package was. The package was called `vibe-check` then, and that name
+# belongs to an unrelated crate published at 0.3.2 — so release-plz compared our
+# 0.1.0 against 0.3.2, concluded there was nothing to release, and exited
+# **successfully** on every push to master since this repository existed. No
+# tag, no release, no version-bump pull request, and no error to notice.
+#
+# #98 renamed the package to `vibe-check-cli`, a name nobody else holds, so that
+# particular collision is gone. `git_only` stays regardless: an unpublished name
+# answers a registry query with "no such crate", and reading versions from the
+# tags we actually cut does not depend on the registry at all.
 #
 # Everything downstream inherits that: with no release there is no
 # `release-dispatch` artifact, so `Release binaries` correctly builds nothing,
@@ -86,13 +93,24 @@ git_only           = true
 # tagged. That circularity is the whole reason for the split; the long form is
 # in docs/releasing.md under "Why two tag namespaces".
 git_tag_name       = "binaries-v{{ version }}"
+# The GitHub release TITLE, pinned to the product name rather than left to
+# release-plz's default `{{ package }}-v{{ version }}`. The default templates on
+# the *package* name, so #98's rename would have moved one published string —
+# the existing release is tagged `binaries-v0.1.0` and titled
+# `vibe-check-v0.1.0` — while no tag, asset or digest moved. Nothing downstream
+# reads the title (`workflow_run` passes tag, version and sha;
+# `dist/install.sh` keys on the tag and the asset name), so pinning it costs
+# nothing and keeps the rename from moving any published string at all.
+git_release_name   = "vibe-check-v{{ version }}"
 git_tag_enable     = false
 git_release_enable = false
 
 # The one package that ships anything, and so the one package that tags and
-# cuts a release.
+# cuts a release. `dist/lint-surface.sh` asserts this name still matches a real
+# crate manifest, because getting it wrong breaks the release chain silently
+# until master runs release-plz.
 [[package]]
-name               = "vibe-check"
+name               = "vibe-check-cli"
 git_tag_enable     = true
 git_release_enable = true
 

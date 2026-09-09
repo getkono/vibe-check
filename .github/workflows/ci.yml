@@ -287,7 +287,7 @@ jobs:
               "The action exited **${EXIT_CODE}**. This job asserts exit 1 —" \
               "\`classify\` reporting it cannot produce a verdict, which is" \
               "all it can do until #62. The table is" \
-              "\`crates/vibe-check/src/exit.rs\`:" \
+              "\`crates/vibe-check-cli/src/exit.rs\`:" \
               "" \
               "- \`2\` — the action passed flags the binary rejects. That is a" \
               "  bug in the action, not in the change under test, and fixing" \

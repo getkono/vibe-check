@@ -1,0 +1,78 @@
+[package]
+name        = "vibe-check-cli"
+description = "Decides which evidence a pull request needs, sources it from the CI you already run, and adjudicates a verdict."
+version.workspace      = true
+edition.workspace      = true
+rust-version.workspace = true
+license.workspace      = true
+repository.workspace   = true
+authors.workspace      = true
+readme.workspace       = true
+keywords.workspace     = true
+categories.workspace   = true
+# `true`, and the only crate in the workspace that says so. release-plz filters
+# the release set on cargo's own notion of publishability *before* any of its
+# own configuration applies — the trace reads `package … is publishable: false`
+# — so a workspace where every crate is `publish = false` has nothing
+# release-plz will ever tag, and it reports "nothing to release" and exits 0.
+# That was the state of this repository for its whole life. Bisected against
+# release-plz 0.3.160 in #99; `git_only` does not substitute for it.
+#
+# Nothing is actually pushed to a registry: `release-plz.toml` sets `publish =
+# false`, so release-plz never runs `cargo publish`, and `git_only = true` keeps
+# it from asking crates.io anything. Whether this crate is ever published is
+# #6's question, not this line's.
+#
+# The name is ours, which is what #98 bought — `vibe-check` on crates.io is an
+# unrelated project at 0.3.2. The taken name was never what stopped a publish,
+# though, and the rename did not unblock one. `[workspace.dependencies]` names
+# the internal crates by path with no `version =`, so cargo refuses while
+# *packaging*, before it contacts any registry: `cargo package -p
+# vibe-check-cli` fails with "all dependencies must have a version requirement
+# specified when packaging; dependency `vibe-check-diff` does not specify a
+# version", both before this rename and after it. That is why `publish = true`
+# carries no live publishing hazard.
+publish     = true
+
+# The library target keeps its own name so that renaming the package (#98) did
+# not ripple into `use vibe_check::…` at two call sites. Three names,
+# deliberately: the package is what a registry would call this, `vibe_check` is
+# what the binaries import, and the two `[[bin]]` names are what a user types.
+[lib]
+name = "vibe_check"
+path = "src/lib.rs"
+
+# Two binaries over one library. `cargo-vibe-check` exists so that
+# `cargo vibe-check` works: cargo invokes `cargo-<name>` and passes the
+# subcommand name back as argv[1], which the shim strips before delegating.
+# Sharing the library is what keeps the local and CI code paths identical by
+# construction rather than by discipline.
+[[bin]]
+name = "vibe-check"
+path = "src/main.rs"
+
+[[bin]]
+name = "cargo-vibe-check"
+path = "src/bin/cargo-vibe-check.rs"
+
+[dependencies]
+vibe-check-model = { workspace = true }
+vibe-check-host  = { workspace = true }
+vibe-check-diff  = { workspace = true }
+async-trait        = { workspace = true }
+blake3             = { workspace = true }
+clap               = { workspace = true }
+color-eyre         = { workspace = true }
+eyre               = { workspace = true }
+# The panic bundle is written as JSON to stdout by `panic.rs`, which is the only
+# renderer this crate has and must not be able to fail for want of a dependency.
+serde_json         = { workspace = true }
+tokio              = { workspace = true, features = ["rt-multi-thread", "macros", "process", "time", "sync"] }
+tracing            = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+[dev-dependencies]
+vibe-check-testkit = { workspace = true }
+
+[lints]
+workspace = true
