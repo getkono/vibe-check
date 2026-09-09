@@ -18,6 +18,11 @@ if [ -n "${VIBE_CHECK_BINARY:-}" ]; then
     exit 1
   fi
   echo "path=${VIBE_CHECK_BINARY}" >> "$GITHUB_OUTPUT"
+  # Machine-readable, next to the prose that says the same thing. A caller whose
+  # claim is "a digest-verified binary ran" cannot check that claim against a
+  # summary line, and this path reaches a passing job having verified nothing
+  # about the chain.
+  echo "digest-verified=false" >> "$GITHUB_OUTPUT"
   summary "### vibe-check"
   summary ""
   summary "Binary supplied by \`VIBE_CHECK_BINARY\` (\`${VIBE_CHECK_BINARY}\`)."
@@ -113,6 +118,9 @@ if [ "$actual" != "$expected" ]; then
   } >&2
   exit 1
 fi
+# Written here rather than beside `path=` below, so it records the comparison
+# that just succeeded and cannot drift onto a path that skipped it.
+echo "digest-verified=true" >> "$GITHUB_OUTPUT"
 
 # --- unpack -----------------------------------------------------------------
 ext=""

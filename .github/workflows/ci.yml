@@ -34,7 +34,14 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: quality
+      # Pinned, not floating. `mise-action` resolves the latest version from
+      # mise.jdx.dev/VERSION, which currently advertises 2026.9.2 while that
+      # release's Linux asset 404s, so every cache-miss run fails before any
+      # repository task executes. Remove this `with:` block once the endpoint
+      # and the released assets agree again.
       - uses: jdx/mise-action@v2
+        with:
+          version: 2026.9.1
       # CI invokes the same task interface as the git hooks. Duplicating the
       # cargo invocations here is how CI and `hk` silently drift apart.
       - name: Check
@@ -51,7 +58,14 @@ jobs:
           persist-credentials: false
       # `convco` is pinned in mise.toml; installing it unpinned here would let
       # CI validate against a different version than the commit-msg hook does.
+      # Pinned, not floating. `mise-action` resolves the latest version from
+      # mise.jdx.dev/VERSION, which currently advertises 2026.9.2 while that
+      # release's Linux asset 404s, so every cache-miss run fails before any
+      # repository task executes. Remove this `with:` block once the endpoint
+      # and the released assets agree again.
       - uses: jdx/mise-action@v2
+        with:
+          version: 2026.9.1
       # `origin/$BASE_REF` is the live base branch, not the
       # `github.event.pull_request.base.sha` tip recorded when the event fired,
       # which drifts as the base branch moves. Two dots, not three: `convco
@@ -63,3 +77,191 @@ jobs:
         env:
           BASE_REF: ${{ github.event.pull_request.base.ref }}
         run: convco check "origin/$BASE_REF..HEAD"
+
+  # Dogfood: run the released action against this repository's own pull
+  # requests. A separate job rather than a step inside `quality`, because this
+  # one needs full history and `quality` does not, and because a job still
+  # earning trust has to be droppable without touching the gate.
+  #
+  # Pinned to the immutable tag, not `@v0`. The alias carries no compatibility
+  # promise before 1.0, and using a moving tag in the workflow that verifies the
+  # moving tag would prove nothing.
+  vibe-check:
+    name: vibe-check
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          # The author's real head commit, not the synthetic `refs/pull/N/merge`
+          # that checkout takes when no ref is given. Two things rest on that.
+          #
+          # The merge ref already carries the base tip as an ancestor, so
+          # `merge-base(refs/pull/N/merge, origin/master)` *is*
+          # `github.event.pull_request.base.sha` — the value
+          # crates/vibe-check-host/src/forge.rs calls out as deliberately not
+          # used as a merge base. Computing the merge base would collapse onto
+          # the number computing it exists to avoid. From the head commit it is
+          # genuinely computed.
+          #
+          # And a time-dependent decision reads the head commit's committer date
+          # (AGENTS.md §6). The merge ref's committer date is when GitHub
+          # synthesised it, and GitHub re-synthesises on every base or head
+          # move, so waiver expiry and artifact freshness would be reading a
+          # wall clock in all but name and re-running this pull request later
+          # could give it a different verdict. The author's commit date does not
+          # move.
+          #
+          # Whether the synthetic merge commit is the right tree to classify at
+          # all is #11's own design question, deliberately not settled here.
+          ref: ${{ github.event.pull_request.head.sha }}
+          # The action refuses a shallow clone: it computes `git merge-base`
+          # rather than trusting `github.event.pull_request.base.sha`, which is
+          # the base branch tip at an earlier moment and drifts as master moves.
+          fetch-depth: 0
+          persist-credentials: false
+      # Not terminal. `classify` is unimplemented in every build published so
+      # far, so failure is this step's expected outcome and the step after it
+      # decides what that failure meant.
+      - id: dogfood
+        uses: getkono/vibe-check@v0.1.0
+        continue-on-error: true
+      # The inversion: the job passes when the action failed in exactly the way
+      # it is expected to, and goes red on every other way.
+      #
+      # Without it the job publishes one signal — the check's colour — for every
+      # failure mode of the published chain, and that colour is red on every
+      # pull request for a reason nobody needs to act on. So the ones that need
+      # acting on arrive invisible: dist/guard.sh refusing the trigger or a
+      # shallow clone, dist/install.sh on a missing dist/RELEASE, an unsupported
+      # runner, a failed download, and a digest mismatch — the asset-clobber
+      # threat docs/releasing.md names, for which this job is the only automated
+      # detector standing where a consumer stands.
+      #
+      # This step reads two signals that the pinned `@v0.1.0` action does not
+      # emit yet, and one that every action ever released does.
+      #
+      # `exit-code` and `digest-verified` are added by this branch to
+      # dist/classify.sh and dist/install.sh, so they arrive here only once a
+      # release is cut from a commit that carries them and the pin above is
+      # advanced to it. Until then both are the empty string, and the
+      # assertion falls back to what is observable without them:
+      # dist/classify.sh creates the verdict file before it runs the binary, so
+      # the file's presence proves guard and install both passed — digest
+      # verification included — and an empty file proves the binary wrote no
+      # verdict document. That inference cannot separate exit 2 from exit 1,
+      # which is the one difference most worth seeing: exit 2 is the action
+      # passing flags the binary rejects, the action/binary incompatibility
+      # this job exists to catch, and today it reads green.
+      #
+      # Once the pin advances, `exit-code` is asserted to be exactly 1 and that
+      # blind spot closes, and `digest-verified=false` — the
+      # `VIBE_CHECK_BINARY` escape hatch, which skips the download and the
+      # digest check entirely — fails the job, because a digest-verified
+      # download is this job's whole claim. Both branches are written now so
+      # the release does not need a matching workflow change.
+      #
+      # When #62 implements `classify`, this step and the `continue-on-error`
+      # above it both go, and the action step becomes terminal again.
+      - name: Assert the action failed the one way it is expected to
+        env:
+          OUTCOME: ${{ steps.dogfood.outcome }}
+          # The action's documented output. Runner 2.337 does set it even
+          # though the composite failed, which is this step's every run; the
+          # fallback to the path dist/classify.sh writes is there because that
+          # is runner behaviour rather than a documented promise.
+          VERDICT_FILE: ${{ steps.dogfood.outputs.verdict-file }}
+          # Empty on the pinned release. An unset output interpolates to the
+          # empty string rather than failing the expression, which is what
+          # makes the fallback above possible.
+          EXIT_CODE: ${{ steps.dogfood.outputs.exit-code }}
+          DIGEST_VERIFIED: ${{ steps.dogfood.outputs.digest-verified }}
+        run: |
+          set -euo pipefail
+          verdict="${VERDICT_FILE:-${RUNNER_TEMP}/vibe-check.json}"
+          note() { printf '%s\n' "$@" >> "$GITHUB_STEP_SUMMARY"; }
+
+          if [ "$OUTCOME" = success ]; then
+            note "### vibe-check dogfood" "" \
+              "The action **passed**. It is no longer expected to fail, so this" \
+              "step and the \`continue-on-error\` above it have outlived their" \
+              "reason — delete both and let the action colour the job."
+            echo "::error::the action passed; classify is implemented, so this assertion is stale"
+            exit 1
+          fi
+
+          # Checked before anything else the run produced, because if this is
+          # false then nothing downstream of it was verified either.
+          if [ "$DIGEST_VERIFIED" = false ]; then
+            note "### vibe-check dogfood" "" \
+              "The action reported \`digest-verified=false\`: it took the" \
+              "\`VIBE_CHECK_BINARY\` escape hatch and never compared the" \
+              "downloaded bytes against the digest committed at the pinned" \
+              "ref. Nothing in this workflow sets that variable, so either the" \
+              "action changed or the runner's environment did. A" \
+              "digest-verified download is the only thing this job claims to" \
+              "prove, and it did not happen."
+            echo "::error::vibe-check ran an unverified binary (digest-verified=false) — this job asserts a digest-verified download"
+            exit 1
+          fi
+
+          # Empty on the pinned release; the file checks below are the fallback.
+          if [ -n "$EXIT_CODE" ] && [ "$EXIT_CODE" != 1 ]; then
+            note "### vibe-check dogfood" "" \
+              "The action exited **${EXIT_CODE}**. This job asserts exit 1 —" \
+              "\`classify\` reporting it cannot produce a verdict, which is" \
+              "all it can do until #62. The table is" \
+              "\`crates/vibe-check/src/exit.rs\`:" \
+              "" \
+              "- \`2\` — the action passed flags the binary rejects. That is a" \
+              "  bug in the action, not in the change under test, and fixing" \
+              "  it means fixing \`dist/classify.sh\` or the action's inputs." \
+              "- \`101\` — the binary came apart before it started: a panic" \
+              "  ahead of the exit-code guard." \
+              "- \`0\`, \`10\`, \`20\` — a real verdict, so this assertion is" \
+              "  stale and should go along with the \`continue-on-error\`." \
+              "" \
+              "Read the action's step log."
+            echo "::error::vibe-check exited ${EXIT_CODE}, not 1 — see the job summary"
+            exit 1
+          fi
+
+          if [ ! -e "$verdict" ]; then
+            note "### vibe-check dogfood" "" \
+              "The action failed **before it classified anything**: no verdict" \
+              "file at \`${verdict}\`. That is the distribution chain, not the" \
+              "tool — the trigger guard, the release lookup, the download, or" \
+              "the digest check. If it is the digest, do not re-run: the" \
+              "release asset no longer matches what this ref was published" \
+              "against. Read the action's step log."
+            echo "::error::vibe-check failed before classifying — the published chain is broken, see the job summary"
+            exit 1
+          fi
+
+          if [ -s "$verdict" ]; then
+            note "### vibe-check dogfood" "" \
+              "The action failed but wrote a verdict document. That is not the" \
+              "not-implemented path, so whatever this job is asserting is no" \
+              "longer what the tool does. Read the action's step log and the" \
+              "\`vibe-check-vibe-check\` artifact."
+            echo "::error::vibe-check wrote a verdict and still failed — this assertion no longer describes the tool"
+            exit 1
+          fi
+
+          note "### vibe-check dogfood" "" \
+            "Expected failure. The published chain ran end to end — trigger" \
+            "guard, digest-verified download, binary invoked — and \`classify\`" \
+            "reported it cannot produce a verdict, which it cannot until #62." \
+            "The job passes because the chain is intact, not because the change" \
+            "was judged."
+          if [ -z "$EXIT_CODE" ]; then
+            note "" \
+              "The pinned action does not expose \`exit-code\` yet, so this" \
+              "run inferred that from the verdict file alone — which cannot" \
+              "tell exit 2 (the action passing flags the binary rejects) or" \
+              "exit 101 apart from exit 1. Cutting a release from a commit" \
+              "that carries the output and advancing the \`@v0.1.0\` pin above" \
+              "turns that inference into an assertion; this step already reads" \
+              "the output when it is there."
+          fi
+          echo "the published action ran and reported it cannot yet produce a verdict — expected until #62"

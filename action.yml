@@ -48,6 +48,24 @@ outputs:
       Absolute path to the written vibe-check.json. Also uploaded as a workflow
       artifact; this output is for a later step in the same job.
     value: ${{ steps.classify.outputs.verdict-file }}
+  exit-code:
+    description: >-
+      The binary's exit code, verbatim, as the table in
+      crates/vibe-check/src/exit.rs defines it. A caller running after this
+      action with `continue-on-error` sees only `outcome`, which collapses
+      every non-zero code into `failure` — so exit 2, the action passing flags
+      the binary rejects, is indistinguishable from a verdict the caller
+      expected. Empty if the run never reached the binary.
+    value: ${{ steps.classify.outputs.exit-code }}
+  digest-verified:
+    description: >-
+      `true` when the downloaded archive was compared against the digest
+      committed at this ref, `false` when `VIBE_CHECK_BINARY` supplied the
+      bytes and that comparison was deliberately skipped. Empty if the step
+      failed before deciding either way. The step summary says the same thing
+      in prose; a caller whose own claim is that a verified binary ran needs it
+      in a form it can branch on.
+    value: ${{ steps.binary.outputs.digest-verified }}
 
 runs:
   using: composite
