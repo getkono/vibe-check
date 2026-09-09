@@ -5,6 +5,20 @@ on:
     branches:
       - master
   pull_request:
+  # #93: this key is a precondition for a merge queue, not a report on
+  # whether one exists. GitHub emits merge_group only once a branch's
+  # protection has "Require merge queue" turned on, so whoever performs that
+  # flip must find the trigger already here — #11's amendment warned that a
+  # required check missing from merge_group is never posted against the
+  # queue's synthetic ref, and an entry waiting on a status that is not
+  # coming merges nothing and is failed out at the queue's status-check
+  # timeout. Landing the trigger first is what makes enabling the queue a
+  # settings change rather than an outage, which is why the order is this way
+  # round. Do not delete this key on the grounds that nothing fires it yet;
+  # that is the state it is written for. See docs/releasing.md, "If master
+  # becomes protected", for the decision this trigger is half of — the other
+  # half, actually enabling the queue, is a repository setting, not code.
+  merge_group:
 
 # Cancel superseded runs on a branch, but never on master.
 concurrency:

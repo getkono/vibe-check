@@ -139,6 +139,80 @@ the tagging. One manual step per release; no new credential.
 Do not reach for a PAT. A long-lived token with write access to master, held to
 avoid one click per release, is a worse trade than the click.
 
+### #93: keeping two green pull requests from merging into a red master
+
+Two pull requests can each pass CI against a stale base and still conflict
+with each other once both land — #91 was exactly this twice over: a guard's
+argument pool shared across a macro's rules, and `RequirementId::new` removed
+in one pull request while new callers of it were added in another. Neither
+GitHub check ever saw the combination that broke, because nothing required
+either branch to be current against the other before merging.
+
+**Decision: a merge queue, not "require branches up to date before
+merging."** Both close the hole completely — a queue re-validates a pull
+request against the current master before merging, exactly what "require
+up to date" forces via a manual re-run. The difference is cost: "require up
+to date" serializes every merge behind a fresh CI run, paid by whoever is
+waiting; a queue pays the same re-validation without blocking a human, which
+matters here because this repository's own tooling delivers backlog work as
+multiple parallel pull requests, and #11's `merge_group` amendment was
+already written in anticipation of this choice.
+
+**Cost taken on:** the `merge_group` trigger in `ci.yml` has to exist before
+the queue is turned on, or the queue accepts entries and merges none of them
+(#11): a workflow with no `merge_group` trigger never runs for the queue's
+synthetic ref, so a check required there is never posted, and an entry
+waiting on a status that is not coming is failed out of the queue when the
+queue's configurable status-check timeout expires. Nothing merges, and the
+recorded reason is a check that was never asked to run rather than one that
+ran and failed. That is the hazard this trigger closes, and it is the only
+one of the two that blocks a merge at all.
+A job that is triggered and then skipped by its own `if:` is the opposite —
+GitHub still posts the check run and reports it as a success, and a skipped
+job does not block a pull request even when it is required. So the
+`Conventional commits` job's `if: github.event_name == 'pull_request'` is
+deliberate, because `github.event.pull_request.base.ref` does not exist
+under `merge_group`, but marking that job required would not hang a queue
+entry; it would pass every one of them green while enforcing nothing. Keep
+`Quality` as the only required check — not because the alternative stalls
+the queue, but because it would be enforcement in name only. Wanting commit
+messages enforced in the queue lane means building a check that is genuinely
+`merge_group`-aware, resolving the commit range some other way when there is
+no base ref to read; that resolution is #11's own unbuilt ladder work, not a
+toggle.
+
+**Second cost, and the one that bites first:** enabling the queue breaks the
+release chain's direct push, on its own, before #62 is reached. "Require merge
+queue" cannot be enabled without "Require a pull request before merging", and
+that setting alone rejects `git push origin HEAD:master` — which is exactly
+what the promote job does at `.github/workflows/release-binaries.yml`. That
+file's own comment ("master carries no branch protection and no ruleset, so the
+built-in token can push") becomes false at the moment the queue is switched on,
+not later when a check is added. The fallback is above, under "If master
+becomes protected"; it has to be in place *before* #115 is executed, or the
+next release fails at the push step with the cause recorded against a different
+decision. #62 and #102 compound this — #102's push already carries zero check
+runs — but neither is required for it to happen.
+
+**Third cost: CI spend roughly doubles per pull request.** Every change now
+runs `Quality` twice, once on `pull_request` and once on `merge_group`, each a
+full `cargo test --workspace --all-targets --all-features` over a
+`fetch-depth: 0` checkout. Actions caches written on a `gh-readonly-queue/*`
+ref are scoped to that ephemeral branch and discarded, so the queue lane can
+read master's `rust-cache` entry but never improves it, and the second run is
+the one most likely to be cold. That is the price of not serialising humans
+behind a re-run, and it is worth paying at this repository's cadence — but it
+is a recurring cost rather than a one-off, and #93 asks for the decision to be
+recorded with its cost.
+
+**What remains, and cannot be done from this repository's code:** branch
+protection on `master` requiring the `Quality` check, "Require merge queue"
+enabled, and "Require branches to be up to date before merging" left off
+(the queue already guarantees that). The settings flip itself is #115, which
+carries the checklist and the verified before-state; #93 is the analysis and
+stays open until the queue is live and one pull request has drained through it.
+Do not execute #115 before the promote job's fallback above is in place.
+
 ## What the digest does and does not protect against
 
 Worth stating, because a verification step that is believed to do more than it
