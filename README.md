@@ -171,9 +171,10 @@ That produces two binaries in `target/release/`: `vibe-check`, and
 `cargo-vibe-check`, which exists so that `cargo vibe-check <command>` works.
 They share one library, so the local and CI paths cannot drift.
 
-The quality gate is `mise run check` — formatting, clippy, `actionlint`, and the
-test suite, in that order. CI runs the same task rather than respelling the
-cargo invocations.
+The quality gate is `mise run check`: formatting, clippy, the workflow and
+dependency-ban lints, and the test suite, in the order `mise.toml` lists them.
+CI runs the same task rather than respelling the cargo invocations, so that list
+lives in exactly one place.
 
 ## Versioning
 
