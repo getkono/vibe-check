@@ -386,6 +386,103 @@ jobs:
           } > dist/RELEASE
           cp incoming/SHA256SUMS dist/SHA256SUMS
 
+          # Three checks, and they find three different things. Stated in the
+          # order of how much each is actually worth here, because the first is
+          # worth the least and reads like it is worth the most.
+          #
+          # 1. `dist/lint-surface.sh` is the same script `mise run
+          #    lint-action-surface` runs locally and in ci.yml's `quality` job
+          #    on every other commit, run here because this is the one commit
+          #    those never see. It is a structural check, and in this job every
+          #    one of its failure modes is unreachable: its first two assertions
+          #    read `action.yml` and release-plz.yml's `name:` out of the master
+          #    checkout — files this step never writes, on a commit CI already
+          #    linted — and its third compares dist/RELEASE's `version` against
+          #    the filenames in dist/SHA256SUMS, both of which descend from the
+          #    same ${VERSION} expansion in this same shell and therefore cannot
+          #    disagree. It never parses `tag` and it never looks at a digest.
+          #    Keep it anyway: it costs nothing, and it is what would catch a
+          #    future edit to this step that stopped writing a well-formed pair
+          #    at all. It is not what makes this commit trustworthy.
+          bash dist/lint-surface.sh
+
+          # 2. The `tag` field, read back out of the file that was just written.
+          #    Nothing else in the repository ever reads it back: lint-surface.sh
+          #    parses only `version`, and `dist/install.sh` parses `tag` on a
+          #    consumer's runner, months later, to build the download URL. A
+          #    dist/RELEASE whose `tag` does not survive a round trip through
+          #    `awk` sends every consumer to a 404 at `uses:` time and fails
+          #    nothing here. That is what this asserts — not that ${TAG} is the
+          #    right tag (this job cannot know that; the resolve job decided it)
+          #    but that the bytes on disk parse back to it, the same way and with
+          #    the same awk program install.sh will use.
+          written_tag="$(awk '$1=="tag"{print $2}' dist/RELEASE)"
+          if [ "$written_tag" != "$TAG" ]; then
+            echo "::error::dist/RELEASE parses back as tag '${written_tag}', not '${TAG}'"
+            exit 1
+          fi
+
+          # 3. The digests, against the bytes GitHub actually served. This is
+          #    the assertion with teeth. `verify/` was filled by the "Verify
+          #    what GitHub actually serves" step above: the five archives pulled
+          #    anonymously from the public release, exactly as a consumer's
+          #    runner pulls them. That step checked `incoming/SHA256SUMS`; this
+          #    one checks `dist/SHA256SUMS`, the copy that is about to be
+          #    committed to master and pointed at by an immutable tag. The two
+          #    are a `cp` apart today, and that `cp` is precisely the step
+          #    between "verified" and "published" that nothing was watching. A
+          #    digest mistranscribed between them is fatal here instead of
+          #    being discovered by a consumer whose install fails a digest
+          #    check against a release that is already tagged and immutable;
+          #    a truncated one is caught by the name-set comparison below,
+          #    which exists because this check does not catch it. Reordering is
+          #    neither caught nor a defect: SHA256SUMS is an unordered set of
+          #    rows, `install.sh` selects its row by name, and the build sorts
+          #    on write only to keep the committed diff readable.
+          #
+          #    Names in SHA256SUMS are bare basenames, so the check has to run
+          #    with cwd inside verify/ and be handed an absolute path to the
+          #    file being checked.
+          #
+          #    A missing verify/ aborts the promotion. It does not skip: a check
+          #    that quietly evaporates when its inputs are absent is the same
+          #    hole this step exists to close, wearing a different costume. If
+          #    the download step is ever moved, renamed, made conditional, or
+          #    starts writing somewhere else, the promotion stops until someone
+          #    reconnects them.
+          if [ ! -d verify ]; then
+            echo "::error::verify/ is absent; 'Verify what GitHub actually serves' must run before this step"
+            exit 1
+          fi
+
+          #    Completeness first, because `sha256sum -c` does not check it.
+          #    It verifies every entry it is handed and says nothing whatever
+          #    about entries it was not handed: a dist/SHA256SUMS naming three
+          #    of the five archives passes it cleanly, and so does one naming
+          #    none in a way that still parses. The digest check below is
+          #    therefore an assertion about the rows present, not about the
+          #    file being the right file.
+          #
+          #    That gap fails closed rather than open — `dist/install.sh` emits
+          #    "has no committed digest in dist/SHA256SUMS at this ref" and
+          #    stops — but it fails closed on a consumer's runner, on one
+          #    platform, months later, against a tag that is already immutable
+          #    and cannot be corrected in place. Catching it here is the whole
+          #    point of self-checking before the push.
+          #
+          #    verify/SHA256SUMS is the reference set: the step above iterated
+          #    it to download, and every name in it was fetched from the public
+          #    release or the job already failed. Comparing name sets rather
+          #    than counting keeps this correct when the build matrix changes.
+          if ! diff -u \
+              <(awk '{ sub(/^\*/, "", $2); print $2 }' verify/SHA256SUMS | sort) \
+              <(awk '{ sub(/^\*/, "", $2); print $2 }' dist/SHA256SUMS | sort); then
+            echo "::error::dist/SHA256SUMS does not name the same archives as the verified release"
+            exit 1
+          fi
+
+          (cd verify && sha256sum -c "${GITHUB_WORKSPACE}/dist/SHA256SUMS")
+
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add dist/RELEASE dist/SHA256SUMS
